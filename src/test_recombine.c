@@ -120,8 +120,8 @@ int T02_extract_subgrid() {
         // we alter intermediate array sizes. However, those would still lead
         // to the same sub-grids after reassembly, to the accuracy of the approximation!
         for (y = 0; y < xM_yN_size; y++) {
-            assert(cabs(nmbf[y] - nmbf_ref[y]) < 3e-12);
-            assert(cabs(nmbf_b[y] - nmbf_ref_b[y]) < 3e-12);
+            assert(cabs(nmbf[y] - nmbf_ref[y]) < 4e-12);
+            assert(cabs(nmbf_b[y] - nmbf_ref_b[y]) < 4e-12);
         }
         free(nmbf_ref); free(nmbf_ref_b);
     }

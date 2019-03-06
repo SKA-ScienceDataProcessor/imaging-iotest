@@ -118,7 +118,7 @@ double complex degrid_conv_uv(double complex *uvgrid, int grid_size, double thet
     }
     __attribute__ ((aligned (32))) double vis_s[4];
     _mm256_store_pd(vis_s, vis);
-    double complex vis_res = vis_s[0] + vis_s[2] + 1j * (vis_s[1] + vis_s[3]);
+    double complex vis_res = vis_s[0] + vis_s[2] + 1.j * (vis_s[1] + vis_s[3]);
 
     *flops += 4 * (1 + kernel->size) * kernel->size;
     return vis_res;

@@ -448,7 +448,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                 complex double vis = 0;
                 for (i = 0; i < source_count; i++) {
                     double ph = u * source_pos_l[i] + v * source_pos_m[i];
-                    vis += cos(ph) + 1j * sin(ph);
+                    vis += cos(ph) + 1.j * sin(ph);
                 }
                 vis /= (double)image_size * image_size;
 
