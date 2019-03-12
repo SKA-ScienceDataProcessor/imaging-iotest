@@ -471,14 +471,14 @@ bool set_cmdarg_config(int argc, char **argv,
         printf("  --recombine=<N>,<Ny>,<yBs>,<yNs>,<yPs>,<xAs>,<xMs>,<xMxMyPs>\n");
         printf("                         Facet/subgrid recombination parameters\n");
         printf("  --rec-aa=<path>        Anti-aliasing function to use for recombination\n");
-        printf("  --rec-set=[test]       Selection recombination parameter set");
-        printf("  --batch-rows=<N>       Image rows to batch per thread");
+        printf("  --rec-set=[test]       Selection recombination parameter set\n");
+        printf("  --batch-rows=<N>       Image rows to batch per thread\n");
         printf("\n");
         printf("Distribution Parameters:\n");
         printf("  --facet-workers=<val>  Number of workers holding facets (default: half)\n");
         printf("  --dont-retain-bf       Discard BF term. Saves memory at expense of compute.\n");
         printf("  --parallel-columns     Work on grid columns in parallel. Worse for distribution.\n");
-        printf("  --send-queue=<N>       Outgoing subgrid queue length (default 8)");
+        printf("  --send-queue=<N>       Outgoing subgrid queue length (default 8)\n");
         printf("  --bls-per-task=<N>     Number of baselines per OpenMP task (default 256)\n");
         printf("  --subgrid-queue=<N>    Incoming subgrid queue length (default 8)\n");
         printf("  --visibility-queue=<N> Outgoing visibility queue length (default 32768)\n");
