@@ -231,6 +231,7 @@ enum Opts
         Opt_facet_workers, Opt_parallel_cols, Opt_dont_retain_bf,
         Opt_source_count, Opt_send_queue,
         Opt_bls_per_task, Opt_subgrid_queue, Opt_task_queue, Opt_visibility_queue,
+        Opt_writer_count,
         Opt_statsd, Opt_statsd_port,
     };
 
@@ -269,6 +270,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"subgrid-queue", required_argument, 0, Opt_subgrid_queue },
         {"task-queue", required_argument, 0, Opt_task_queue },
         {"visibility-queue", required_argument, 0, Opt_visibility_queue },
+        {"writer-count",required_argument,0, Opt_writer_count },
 
         {"statsd",     optional_argument, 0, Opt_statsd },
         {"statsd-port",required_argument, 0, Opt_statsd_port },
@@ -418,6 +420,12 @@ bool set_cmdarg_config(int argc, char **argv,
             nscan = sscanf(optarg, "%d", &cfg->vis_chunk_queue_length);
             if (nscan != 1) {
                 invalid=true; fprintf(stderr, "ERROR: Could not parse 'visibility-queue' option!\n");
+            }
+            break;
+        case Opt_writer_count:
+            nscan = sscanf(optarg, "%d", &cfg->vis_writer_count);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'writer-count' option!\n");
             }
             break;
         case Opt_statsd:

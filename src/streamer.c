@@ -2,6 +2,7 @@
 #include "grid.h"
 #include "config.h"
 
+#include <hdf5.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <math.h>
@@ -17,6 +18,41 @@
 #define MPI_Request int
 #define MPI_REQUEST_NULL 0
 #endif
+
+struct streamer_chunk
+{
+    int a1, a2, tchunk, fchunk;
+    omp_lock_t in_lock, out_lock; // Ready to fill / write to disk
+    double complex *vis;
+};
+
+struct streamer_writer
+{
+
+    // Index of worker, and writer (unique across distributed program)
+    int subgrid_worker;
+    int index;
+    pthread_t thread;
+
+    // Visibility file
+    hid_t file, group;
+
+    // Visibility Chunk queue
+    int queue_length;
+    int in_ptr, out_ptr;
+    int to_write;
+    struct streamer_chunk *queue;
+
+    // Work config
+    struct work_config *work_cfg;
+
+    // Statistics
+    double wait_out_time;
+    double read_time;
+    double write_time;
+    uint64_t written_vis_data, rewritten_vis_data;
+
+};
 
 struct streamer
 {
@@ -41,30 +77,24 @@ struct streamer
     fftw_plan subgrid_plan;
 
     // Visibility chunk queue (to be written)
+    int writer_count;
     int vis_queue_length;
+    int vis_queue_per_writer;
     double complex *vis_queue;
-    int *vis_a1, *vis_a2, *vis_tchunk, *vis_fchunk;
-    int vis_in_ptr, vis_out_ptr;
-    omp_lock_t *vis_in_lock, *vis_out_lock; // Ready to fill / write to disk
-
-    // Visibility file
-    hid_t vis_file;
-    hid_t vis_group;
+    struct streamer_chunk *vis_chunks;
+    struct streamer_writer *writer;
 
     // Statistics
     int num_workers;
     double wait_time;
-    double wait_in_time, wait_out_time;
-    double read_time, write_time;
+    double wait_in_time;
     double recombine_time, task_start_time, degrid_time;
     uint64_t received_data, received_subgrids, baselines_covered;
-    uint64_t written_vis_data, rewritten_vis_data;
     uint64_t square_error_samples;
     double square_error_sum, worst_error;
     uint64_t degrid_flops;
     uint64_t produced_chunks;
     uint64_t task_yields;
-    uint64_t chunks_to_write;
 
     // Signal for being finished
     bool finished;
@@ -89,6 +119,35 @@ static double complex *subgrid_slot(struct streamer *streamer, int slot)
 {
     const int xM_size = streamer->work_cfg->recombine.xM_size;
     return streamer->subgrid_queue + xM_size * xM_size * slot;
+}
+
+struct streamer_chunk *writer_push_slot(struct streamer_writer *writer,
+                                        int a1, int a2, int tchunk, int fchunk)
+{
+    if (!writer) return NULL;
+
+    // Determine our slot (competing with other tasks, so need to have
+    // critical section here)
+    int vis_slot;
+    #pragma omp critical
+    {
+        vis_slot = writer->in_ptr;
+        writer->in_ptr = (writer->in_ptr + 1) % writer->queue_length;
+    }
+
+    // Obtain lock for writing data (writer thread might not have
+    // written this data to disk yet)
+    struct streamer_chunk *chunk = writer->queue + vis_slot;
+#pragma omp atomic
+    writer->to_write += 1;
+    omp_set_lock(&chunk->in_lock);
+
+    // Set slot data
+    chunk->a1 = a1;
+    chunk->a2 = a2;
+    chunk->tchunk = tchunk;
+    chunk->fchunk = fchunk;
+    return chunk;
 }
 
 void streamer_ireceive(struct streamer *streamer,
@@ -167,20 +226,25 @@ int streamer_receive_a_subgrid(struct streamer *streamer,
         // that we need to receive *something* before we get more work
         // to do.
         int index_count = 0;
-        if (waiting == 0) {
-            MPI_Testsome(facet_work_count * streamer->queue_length, streamer->request_queue,
-                         &index_count, waitsome_indices, MPI_STATUSES_IGNORE);
-        } else {
-            MPI_Waitsome(facet_work_count * streamer->queue_length, streamer->request_queue,
-                         &index_count, waitsome_indices, MPI_STATUSES_IGNORE);
+        if (facet_work_count > 0) {
+            if (waiting == 0) {
+                MPI_Testsome(facet_work_count * streamer->queue_length, streamer->request_queue,
+                             &index_count, waitsome_indices, MPI_STATUSES_IGNORE);
+            } else {
+                MPI_Waitsome(facet_work_count * streamer->queue_length, streamer->request_queue,
+                             &index_count, waitsome_indices, MPI_STATUSES_IGNORE);
+            }
         }
 
-        // Note how much data was received, and check that the
-        // indicated requests were actually cleared (this behaviour
-        // isn't exactly prominently documented?).
+        // Note how much data was received
         int i;
+        if (index_count > 0) {
 #pragma omp atomic
-        streamer->received_data += index_count * streamer->work_cfg->recombine.NMBF_NMBF_size;
+            streamer->received_data += index_count * streamer->work_cfg->recombine.NMBF_NMBF_size;
+        }
+
+        // Check that the indicated requests were actually cleared
+        // (this behaviour isn't exactly prominently documented?).
         for (i = 0; i < index_count; i++) {
             assert(streamer->request_queue[waitsome_indices[i]] == MPI_REQUEST_NULL);
             streamer->request_queue[waitsome_indices[i]] = MPI_REQUEST_NULL;
@@ -272,11 +336,39 @@ void *streamer_reader_thread(void *param)
 
 void *streamer_writer_thread(void *param)
 {
-    struct streamer *streamer = (struct streamer *) param;
+    struct streamer_writer *writer = (struct streamer_writer *) param;
+    struct work_config *wcfg = writer->work_cfg;
 
-    struct vis_spec *const spec = &streamer->work_cfg->spec;
+    struct vis_spec *const spec = &writer->work_cfg->spec;
     const int vis_data_size = sizeof(double complex) * spec->time_chunk * spec->freq_chunk;
     double complex *vis_data_h5 = (double complex *) alloca(vis_data_size);
+
+    // Create HDF5 output file if we are meant to output any amount of
+    // visibilities
+    if (!wcfg->vis_path)
+        return NULL;
+
+    // Get filename to use
+    char filename[512];
+    sprintf(filename, wcfg->vis_path, writer->index);
+
+    // For some reason we need to protect creating the file with a
+    // critical section, otherwise libhdf5 messes up. Note that
+    // creating groups (below) is apparently fine to do in parallel.
+#pragma omp critical
+    {
+        // Open file and "vis" group
+        printf("\nCreating %s... ", filename);
+        writer->file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+        writer->group = H5Gcreate(writer->file, "vis", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    }
+    if (writer->file < 0 || writer->group < 0) {
+        fprintf(stderr, "Could not open visibility file %s!\n", filename);
+        return NULL;
+    }
+
+    // Create baseline groups
+    create_bl_groups(writer->group, wcfg, writer->subgrid_worker);
 
     int time_chunk_count = spec->time_count / spec->time_chunk;
     int freq_chunk_count = spec->freq_count / spec->freq_chunk;
@@ -288,42 +380,39 @@ void *streamer_writer_thread(void *param)
 
         // Obtain "out" lock for writing out visibilities
         double start = get_time_ns();
-        omp_set_lock(streamer->vis_out_lock + streamer->vis_out_ptr);
-        streamer->wait_out_time += get_time_ns() - start;
+        struct streamer_chunk *chunk = writer->queue + writer->out_ptr;
+        omp_set_lock(&chunk->out_lock);
+        writer->wait_out_time += get_time_ns() - start;
 
         start = get_time_ns();
 
         // Obtain baseline data
         struct bl_data bl_data;
-        int tchunk = streamer->vis_tchunk[streamer->vis_out_ptr];
-        int fchunk = streamer->vis_fchunk[streamer->vis_out_ptr];
-        if (tchunk == -1 && fchunk == -1)
+        if (chunk->tchunk == -1 && chunk->fchunk == -1)
             break; // Signal to end thread
-        if (tchunk == -2 && fchunk == -2) {
+        if (chunk->tchunk == -2 && chunk->fchunk == -2) {
             #pragma omp atomic
-                streamer->chunks_to_write -= 1;
-            omp_unset_lock(streamer->vis_in_lock + streamer->vis_out_ptr);
-            streamer->vis_out_ptr = (streamer->vis_out_ptr + 1) % streamer->vis_queue_length;
+                writer->to_write -= 1;
+            omp_unset_lock(&chunk->in_lock);
+            writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
             continue; // Signal to ignore chunk
         }
-        vis_spec_to_bl_data(&bl_data, spec,
-                            streamer->vis_a1[streamer->vis_out_ptr],
-                            streamer->vis_a2[streamer->vis_out_ptr]);
-        double complex *vis_data = streamer->vis_queue +
-            streamer->vis_out_ptr * spec->time_chunk * spec->freq_chunk;
+        vis_spec_to_bl_data(&bl_data, spec, chunk->a1, chunk->a2);
+        double complex *vis_data = chunk->vis;
 
         // Read visibility chunk. If it was not yet set, this will
         // just fill the buffer with zeroes.
         int chunk_index = ((bl_data.antenna2 * spec->cfg->ant_count + bl_data.antenna1)
-                           * time_chunk_count + tchunk) * freq_chunk_count + fchunk;
+                           * time_chunk_count + chunk->tchunk) * freq_chunk_count + chunk->fchunk;
         if (bls_written[chunk_index]) {
-            read_vis_chunk(streamer->vis_group, &bl_data,
-                           spec->time_chunk, spec->freq_chunk, tchunk, fchunk,
+            read_vis_chunk(writer->group, &bl_data,
+                           spec->time_chunk, spec->freq_chunk,
+                           chunk->tchunk, chunk->fchunk,
                            vis_data_h5);
         } else {
             memset(vis_data_h5, 0, vis_data_size);
         }
-        streamer->read_time += get_time_ns() - start;
+        writer->read_time += get_time_ns() - start;
 
         // Copy over data
         start = get_time_ns();
@@ -337,25 +426,28 @@ void *streamer_writer_thread(void *param)
         }
 
         // Write chunk back
-        write_vis_chunk(streamer->vis_group, &bl_data,
-                        spec->time_chunk, spec->freq_chunk, tchunk, fchunk,
+        write_vis_chunk(writer->group, &bl_data,
+                        spec->time_chunk, spec->freq_chunk,
+                        chunk->tchunk, chunk->fchunk,
                         vis_data_h5);
 
-        streamer->written_vis_data += vis_data_size;
+        writer->written_vis_data += vis_data_size;
         if (bls_written[chunk_index])
-            streamer->rewritten_vis_data += vis_data_size;
+            writer->rewritten_vis_data += vis_data_size;
         bls_written[chunk_index] = true;
 
         free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
 
         // Release "in" lock to mark the slot free for writing
         #pragma omp atomic
-            streamer->chunks_to_write -= 1;
-        omp_unset_lock(streamer->vis_in_lock + streamer->vis_out_ptr);
-        streamer->vis_out_ptr = (streamer->vis_out_ptr + 1) % streamer->vis_queue_length;
-        streamer->write_time += get_time_ns() - start;
+            writer->to_write -= 1;
+        omp_unset_lock(&chunk->in_lock);
+        writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
+        writer->write_time += get_time_ns() - start;
 
     }
+
+    H5Gclose(writer->group); H5Fclose(writer->file);
 
     return NULL;
 }
@@ -538,52 +630,44 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     if (!overlap && !inv_overlap)
         return false;
 
-    // Determine our slot (competing with other tasks, so need to have
-    // critical section here)
-    int vis_slot;
-    #pragma omp critical
-    {
-        vis_slot = streamer->vis_in_ptr;
-        streamer->vis_in_ptr = (streamer->vis_in_ptr + 1) % streamer->vis_queue_length;
+    // Determine least busy writer
+    int i, least_waiting = 2 * streamer->vis_queue_per_writer;
+    struct streamer_writer *writer = streamer->writer;
+    for (i = 0; i < streamer->writer_count; i++) {
+        if (streamer->writer[i].to_write < least_waiting) {
+            least_waiting = streamer->writer[i].to_write;
+            writer = streamer->writer + i;
+        }
     }
 
-    // Obtain lock for writing data (writer thread might not have
-    // written this data to disk yet)
-    if(streamer->vis_group >= 0)
-        omp_set_lock(streamer->vis_in_lock + vis_slot);
-
-    // Set slot data
-    streamer->vis_a1[vis_slot] = bl->a1;
-    streamer->vis_a2[vis_slot] = bl->a2;
-    streamer->vis_tchunk[vis_slot] = tchunk;
-    streamer->vis_fchunk[vis_slot] = fchunk;
+    // Acquire a slot
+    struct streamer_chunk *chunk
+        = writer_push_slot(writer, bl->a1, bl->a2, tchunk, fchunk);
     #pragma omp atomic
         streamer->wait_in_time += get_time_ns() - start;
     start = get_time_ns();
 
     // Do degridding
-    double complex *vis_data_out = streamer->vis_queue +
-        vis_slot * spec->time_chunk * spec->freq_chunk;
+    const size_t chunk_vis_size = sizeof(double complex) * spec->freq_chunk * spec->time_chunk;
     uint64_t flops = streamer_degrid_worker(streamer, bl_data, subgrid,
                                             sg_mid_u, sg_mid_v, work->iu, work->iv,
                                             it0, it1, if0, if1,
                                             sg_min_u, sg_max_u, sg_min_v, sg_max_v,
-                                            vis_data_out);
+                                            chunk ? chunk->vis : alloca(chunk_vis_size));
     #pragma omp atomic
       streamer->degrid_time += get_time_ns() - start;
 
-    // No flops executed? Signal to writer that we can skip writing
-    // this chunk (small optimisation)
-    if (flops == 0) {
-        streamer->vis_tchunk[vis_slot] = -2;
-        streamer->vis_fchunk[vis_slot] = -2;
-    }
+    if (chunk) {
 
-    // Signal slot for output
-    if(streamer->vis_group >= 0) {
-        omp_unset_lock(streamer->vis_out_lock + vis_slot);
-    #pragma omp atomic
-        streamer->chunks_to_write += 1;
+        // No flops executed? Signal to writer that we can skip writing
+        // this chunk (small optimisation)
+        if (flops == 0) {
+            chunk->tchunk = -2;
+            chunk->fchunk = -2;
+        }
+
+        // Signal slot for output
+        omp_unset_lock(&chunk->out_lock);
     }
 
     return true;
@@ -789,6 +873,19 @@ void streamer_work(struct streamer *streamer,
     }
 }
 
+static void _append_stat(char *stats, const char *stat_name, int worker, double val, double mult)
+{
+    sprintf(stats + strlen(stats), "user.recombine.%s:%ld|g|#streamer:%d\n",
+            stat_name, (uint64_t)(val * mult), worker);
+}
+
+static void _append_writer_stat(char *stats, const char *stat_name, int worker, int writer,
+                                double val, double mult)
+{
+    sprintf(stats + strlen(stats), "user.recombine.%s:%ld|g|#streamer:%d,writer:%d\n",
+            stat_name, (uint64_t)(val * mult), worker, writer);
+}
+
 void *streamer_publish_stats(void *par)
 {
 
@@ -797,58 +894,73 @@ void *streamer_publish_stats(void *par)
     struct streamer last, now;
     memcpy(&last, streamer, sizeof(struct streamer));
 
+    struct streamer_writer *writers_last, *writers_now;
+    const size_t writers_size = sizeof(struct streamer_writer) * streamer->writer_count;
+    writers_last = (struct streamer_writer *)malloc(writers_size);
+    writers_now = (struct streamer_writer *)malloc(writers_size);
+    memcpy(writers_last, streamer->writer, writers_size);
+    last.writer = writers_last;
+
     double sample_rate = streamer->work_cfg->statsd_rate;
     double next_stats = get_time_ns() + sample_rate;
 
     while(!streamer->finished) {
 
-        // Make a copy of streamer state
+        // Make a snapshot of streamer state
         memcpy(&now, streamer, sizeof(struct streamer));
+        memcpy(writers_now, streamer->writer, writers_size);
+        now.writer = writers_now;
 
         // Add counters
         char stats[4096];
         stats[0] = 0;
-#define PUBLISH(stat, mult, max)                                        \
-        do {                                                            \
-            sprintf(stats + strlen(stats), "user.recombine.streamer." #stat ".g:%ld|g\n", \
-                    (uint64_t)(mult * (now.stat - last.stat) / max));   \
-        } while(0)
-        PUBLISH(wait_time, 100, sample_rate);
-        PUBLISH(wait_in_time, 100, streamer->num_workers * sample_rate);
-        PUBLISH(wait_out_time, 100, sample_rate);
-        PUBLISH(read_time, 100, sample_rate);
-        PUBLISH(write_time, 100, sample_rate);
-        PUBLISH(task_start_time, 100, sample_rate);
-        PUBLISH(recombine_time, 100, sample_rate);
-        PUBLISH(degrid_time, 100, streamer->num_workers * sample_rate);
-        PUBLISH(received_data, 1, sample_rate);
-        PUBLISH(received_subgrids, 1, sample_rate);
-        PUBLISH(baselines_covered, 1, sample_rate);
-        PUBLISH(written_vis_data, 1, sample_rate);
-        PUBLISH(rewritten_vis_data, 1, sample_rate);
-        PUBLISH(degrid_flops, 1, sample_rate);
-        PUBLISH(produced_chunks, 1, sample_rate);
-        PUBLISH(task_yields, 1, sample_rate);
-        PUBLISH(square_error_samples, 1, sample_rate);
+#define PARS(stat) stats, #stat, streamer->subgrid_worker, now.stat - last.stat
+        _append_stat(PARS(wait_time), 100. / sample_rate);
+        _append_stat(PARS(wait_time), 100 / sample_rate);
+        _append_stat(PARS(wait_in_time), 100. / streamer->num_workers / sample_rate);
+        _append_stat(PARS(task_start_time), 100 / sample_rate);
+        _append_stat(PARS(recombine_time), 100 / sample_rate);
+        _append_stat(PARS(degrid_time), 100. / streamer->num_workers / sample_rate);
+        _append_stat(PARS(received_data), 1 / sample_rate);
+        _append_stat(PARS(received_subgrids), 1 / sample_rate);
+        _append_stat(PARS(baselines_covered), 1 / sample_rate);
+        _append_stat(PARS(degrid_flops), 1 / sample_rate);
+        _append_stat(PARS(produced_chunks), 1 / sample_rate);
+        _append_stat(PARS(task_yields), 1 / sample_rate);
+        _append_stat(PARS(square_error_samples), 1 / sample_rate);
+#undef PARS
         config_send_statsd(streamer->work_cfg, stats);
+        stats[0] = 0;
+
+        int i;
+        for (i = 0; i < streamer->writer_count; i++) {
+#define PARS(stat) stats, #stat, streamer->subgrid_worker, now.writer[i].index, now.writer[i].stat - last.writer[i].stat
+            _append_writer_stat(PARS(wait_out_time), 100 / sample_rate);
+            _append_writer_stat(PARS(read_time), 100 / sample_rate);
+            _append_writer_stat(PARS(write_time), 100 / sample_rate);
+            _append_writer_stat(PARS(written_vis_data), 1 / sample_rate);
+            _append_writer_stat(PARS(rewritten_vis_data), 1 / sample_rate);
+#undef PARS
+            _append_writer_stat(stats, "chunks_to_write", streamer->subgrid_worker,
+                                now.writer[i].index, now.writer[i].to_write, 1);
+        }
 
         // Receiver idle time
-        stats[0] = 0;
         double receiver_idle_time = 0;
         receiver_idle_time = sample_rate;
         receiver_idle_time -= now.wait_time - last.wait_time;
         receiver_idle_time -= now.task_start_time - last.task_start_time;
         receiver_idle_time -= now.recombine_time - last.recombine_time;
-        sprintf(stats + strlen(stats), "user.recombine.streamer.receiver_idle_time.gg:%ld|g\n",
-                (int64_t)(receiver_idle_time * 100 / sample_rate));
+        _append_stat(stats, "receiver_idle_time", streamer->subgrid_worker,
+                     receiver_idle_time, 100 / sample_rate);
 
         // Worker idle time
         double worker_idle_time = 0;
         worker_idle_time = streamer->num_workers * sample_rate;
         worker_idle_time -= now.wait_in_time - last.wait_in_time;
         worker_idle_time -= now.degrid_time - last.degrid_time;
-        sprintf(stats + strlen(stats), "user.recombine.streamer.worker_idle_time.gg:%ld|g\n",
-                (int64_t)(worker_idle_time * 100 / sample_rate / streamer->num_workers));
+        _append_stat(stats, "worker_idle_time", streamer->subgrid_worker,
+                     worker_idle_time, 100 / sample_rate / streamer->num_workers);
 
         // Add gauges
         double derror_sum = now.square_error_sum - last.square_error_sum;
@@ -857,30 +969,30 @@ void *streamer_publish_stats(void *par)
             const int source_count = streamer->work_cfg->produce_source_count;
             const int image_size = streamer->work_cfg->recombine.image_size;
             double energy = (double)source_count / image_size / image_size;
-            sprintf(stats + strlen(stats),
-                    "user.recombine.streamer.visibility_samples:%ld|g\n"
-                    "user.recombine.streamer.visibility_rmse:%g|g\n",
-                    dsamples, 10 * log(sqrt(derror_sum / dsamples) / energy) / log(10));
+            _append_stat(stats, "visibility_samples", streamer->subgrid_worker,
+                         dsamples, 1);
+            _append_stat(stats, "visibility_rmse", streamer->subgrid_worker,
+                         10 * log(sqrt(derror_sum / dsamples) / energy) / log(10), 1);
         }
-        sprintf(stats + strlen(stats),
-                "user.recombine.streamer.degrid_tasks:%d|g\n",
-                now.subgrid_tasks);
-        int i, nrequests = 0; //, nactual = 0;
+        _append_stat(stats, "degrid_tasks", streamer->subgrid_worker,
+                     now.subgrid_tasks, 1);
+
         const int request_queue_length = streamer->work_cfg->facet_workers *
             streamer->work_cfg->facet_max_work * streamer->queue_length;
-        for (i = 0; i < request_queue_length; i++) {
+        int nrequests = 0;
+        for (i = 0; i < request_queue_length; i++)
             if (now.request_queue[i] != MPI_REQUEST_NULL)
                 nrequests++;
-        }
-        sprintf(stats + strlen(stats), "user.recombine.streamer.waiting_requests:%d|g\n", nrequests);
-        sprintf(stats + strlen(stats), "user.recombine.streamer.outstanding_requests:%d|g\n", nrequests);
-        sprintf(stats + strlen(stats),
-                "user.recombine.streamer.chunks_to_write:%ld|g\n",
-                now.chunks_to_write);
+        _append_stat(stats, "waiting_requests", streamer->subgrid_worker,
+                     nrequests, 1);
 
         // Send to statsd server
         config_send_statsd(streamer->work_cfg, stats);
+
+        // Copy from "now" to "last", to use as reference next time
         memcpy(&last, &now, sizeof(struct streamer));
+        memcpy(writers_last, writers_now, writers_size);
+        last.writer = writers_last;
 
         // Determine when to next send stats, sleep
         while (next_stats <= get_time_ns()) {
@@ -904,21 +1016,18 @@ bool streamer_init(struct streamer *streamer,
     streamer->producer_ranks = producer_ranks;
 
     streamer->have_kern = false;
-    streamer->vis_file = streamer->vis_group = -1;
     streamer->num_workers = omp_get_max_threads();
-    streamer->wait_time = streamer->wait_in_time = streamer->wait_out_time =
+    streamer->wait_time = streamer->wait_in_time = streamer->degrid_time =
         streamer->task_start_time = streamer->recombine_time = 0;
-    streamer->read_time = streamer->write_time = streamer->degrid_time = 0;
     streamer->received_data = 0;
     streamer->received_subgrids = streamer->baselines_covered = 0;
-    streamer->written_vis_data = streamer->rewritten_vis_data = 0;
     streamer->square_error_samples = 0;
     streamer->square_error_sum = 0;
     streamer->worst_error = 0;
     streamer->degrid_flops = 0;
     streamer->produced_chunks = 0;
     streamer->task_yields = 0;
-    streamer->chunks_to_write = 0;
+    streamer->subgrid_tasks = 0;
     streamer->finished = false;
 
     // Load gridding kernel
@@ -928,30 +1037,22 @@ bool streamer_init(struct streamer *streamer,
         streamer->have_kern = true;
     }
 
-    // Create HDF5 output file if we are meant to output any amount of
-    // visibilities
-    if (wcfg->vis_path) {
-
-        // Get filename to use
-        char filename[512];
-        sprintf(filename, wcfg->vis_path, subgrid_worker);
-
-        // Open file and "vis" group
-        printf("\nCreating %s... ", filename);
-        streamer->vis_file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-        streamer->vis_group = H5Gcreate(streamer->vis_file, "vis", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-        if (streamer->vis_file < 0 || streamer->vis_group < 0) {
-            fprintf(stderr, "Could not open visibility file %s!\n", filename);
-        } else {
-            create_bl_groups(streamer->vis_group, wcfg, subgrid_worker);
-        }
-
-        H5Fflush(streamer->vis_file, H5F_SCOPE_LOCAL);
-    }
-
     // Calculate size of queues
+    hbool_t hdf5_threadsafe;
     streamer->queue_length = wcfg->vis_subgrid_queue_length;
     streamer->vis_queue_length = wcfg->vis_chunk_queue_length;
+    streamer->writer_count = (wcfg->vis_path ? wcfg->vis_writer_count : 0);
+    H5is_library_threadsafe(&hdf5_threadsafe);
+    if (streamer->writer_count > 1 && !hdf5_threadsafe) {
+        fprintf(stderr, "WARNING: libhdf5 is not thread safe, using only one writer thread!");
+        streamer->writer_count = 1;
+    }
+    if (streamer->writer_count > 0) {
+        streamer->vis_queue_per_writer = streamer->vis_queue_length / streamer->writer_count;
+    } else {
+        streamer->vis_queue_per_writer = 0;
+    }
+
     const int nmbf_length = cfg->NMBF_NMBF_size / sizeof(double complex);
     const size_t queue_size = (size_t)sizeof(double complex) * nmbf_length * facets * streamer->queue_length;
     const size_t sg_queue_size = (size_t)cfg->SG_size * streamer->queue_length;
@@ -997,26 +1098,39 @@ bool streamer_init(struct streamer *streamer,
                                               FFTW_BACKWARD, FFTW_MEASURE);
     // Allocate visibility queue
     streamer->vis_queue = malloc((size_t)streamer->vis_queue_length * vis_data_size);
-    streamer->vis_a1 = malloc((size_t)streamer->vis_queue_length * sizeof(int));
-    streamer->vis_a2 = malloc((size_t)streamer->vis_queue_length * sizeof(int));
-    streamer->vis_tchunk = malloc((size_t)streamer->vis_queue_length * sizeof(int));
-    streamer->vis_fchunk = malloc((size_t)streamer->vis_queue_length * sizeof(int));
-    streamer->vis_in_lock = malloc((size_t)streamer->vis_queue_length * sizeof(omp_lock_t));
-    streamer->vis_out_lock = malloc((size_t)streamer->vis_queue_length * sizeof(omp_lock_t));
-    streamer->vis_in_ptr = streamer->vis_out_ptr = 0;
-    if (!streamer->vis_queue || !streamer->vis_a1 || !streamer->vis_a2 ||
-        !streamer->vis_tchunk || !streamer->vis_fchunk ||
-        !streamer->vis_in_lock || !streamer->vis_out_lock) {
+    streamer->vis_chunks = malloc((size_t)streamer->vis_queue_length * sizeof(struct streamer_chunk));
+    if (!streamer->vis_queue || !streamer->vis_chunks) {
 
         fprintf(stderr, "ERROR: Could not allocate visibility queue!\n");
         return false;
     }
 
-    int i;
-    for (i = 0; i < streamer->vis_queue_length; i++) {
-        omp_init_lock(streamer->vis_in_lock + i);
-        omp_init_lock(streamer->vis_out_lock + i);
-        omp_set_lock(streamer->vis_out_lock + i);
+    // Initialise writer thread data
+    streamer->writer = NULL;
+    if (streamer->writer_count > 0) {
+        streamer->writer = calloc(streamer->writer_count, sizeof(struct streamer_writer));
+        int i;
+        for (i = 0; i < streamer->writer_count; i++) {
+            struct streamer_writer *writer = streamer->writer + i;
+            writer->subgrid_worker = subgrid_worker;
+            writer->index = subgrid_worker * streamer->writer_count + i;
+            writer->work_cfg = wcfg;
+            writer->file = writer->group = -1;
+            writer->queue_length = streamer->vis_queue_per_writer;
+            writer->in_ptr = writer->out_ptr =
+                writer->to_write = 0;
+            writer->queue = streamer->vis_chunks + i * streamer->vis_queue_per_writer;
+            int j;
+            for (j = 0; j < streamer->vis_queue_per_writer; j++) {
+                omp_init_lock(&writer->queue[j].in_lock);
+                omp_init_lock(&writer->queue[j].out_lock);
+                omp_set_lock(&writer->queue[j].out_lock);
+                writer->queue[j].vis = streamer->vis_queue +
+                    spec->time_chunk * spec->freq_chunk * (i * streamer->vis_queue_per_writer + j);
+            }
+
+            pthread_create(&writer->thread, NULL, streamer_writer_thread, writer);
+        }
     }
 
     return true;
@@ -1026,17 +1140,14 @@ void streamer_free(struct streamer *streamer,
                    double stream_start)
 {
 
-    free(streamer->nmbf_queue); free(streamer->subgrid_queue);
-    free(streamer->request_queue); free(streamer->subgrid_locks);
-    free(streamer->skip_receive);
-    fftw_free(streamer->subgrid_plan);
-    free(streamer->vis_queue);
-    free(streamer->vis_a1); free(streamer->vis_a2);
-    free(streamer->vis_tchunk); free(streamer->vis_fchunk);
-    free(streamer->vis_in_lock); free(streamer->vis_out_lock);
-
-    if (streamer->vis_group >= 0) {
-        H5Gclose(streamer->vis_group); H5Fclose(streamer->vis_file);
+    // Wait for writer to actually finish
+    int i;
+    if (streamer->writer_count > 0) {
+        printf("Finishing writes...\n");
+        for (i = 0; i < streamer->writer_count; i++) {
+            struct streamer_writer *writer = streamer->writer + i;
+            pthread_join(writer->thread, NULL);
+        }
     }
 
     double stream_time = get_time_ns() - stream_start;
@@ -1044,12 +1155,6 @@ void streamer_free(struct streamer *streamer,
     printf("Received %.2f GB (%ld subgrids, %ld baselines)\n",
            (double)streamer->received_data / 1000000000, streamer->received_subgrids,
            streamer->baselines_covered);
-    printf("Written %.2f GB (rewritten %.2f GB), rate %.2f GB/s (%.2f GB/s effective)\n",
-           (double)streamer->written_vis_data / 1000000000,
-           (double)streamer->rewritten_vis_data / 1000000000,
-           (double)streamer->written_vis_data / 1000000000 / stream_time,
-           (double)(streamer->written_vis_data - streamer->rewritten_vis_data)
-           / 1000000000 / stream_time);
     printf("Receiver: Wait: %gs, Recombine: %gs, Idle: %gs\n",
            streamer->wait_time, streamer->recombine_time,
            stream_time - streamer->wait_time - streamer->recombine_time);
@@ -1059,9 +1164,6 @@ void streamer_free(struct streamer *streamer,
            streamer->num_workers * stream_time
            - streamer->wait_in_time - streamer->degrid_time
            - streamer->wait_time - streamer->recombine_time);
-    printf("Writer: Wait: %gs, Read: %gs, Write: %gs, Idle: %gs\n",
-           streamer->wait_out_time, streamer->read_time, streamer->write_time,
-           stream_time - streamer->wait_out_time - streamer->read_time - streamer->write_time);
     printf("Operations: degrid %.1f GFLOP/s (%ld chunks)\n",
            (double)streamer->degrid_flops / stream_time / 1000000000,
            streamer->produced_chunks);
@@ -1076,6 +1178,29 @@ void streamer_free(struct streamer *streamer,
         printf("Accuracy: RMSE %g, worst %g (%ld samples)\n", rmse / energy,
                streamer->worst_error / energy, streamer->square_error_samples);
     }
+
+    for (i = 0; i < streamer->writer_count; i++) {
+        struct streamer_writer *writer = streamer->writer + i;
+
+        // Then print stats. The above join can hang a bit as data
+        // gets flushed, so re-determine stream time.
+        printf("Writer %d: %.2f GB (rewritten %.2f GB), rate %.2f GB/s (%.2f GB/s effective)\n",
+               writer->index,
+               (double)writer->written_vis_data / 1000000000,
+               (double)writer->rewritten_vis_data / 1000000000,
+               (double)writer->written_vis_data / 1000000000 / stream_time,
+               (double)(writer->written_vis_data - writer->rewritten_vis_data)
+               / 1000000000 / stream_time);
+        printf("Writer %d: Wait: %gs, Read: %gs, Write: %gs, Idle: %gs\n", writer->index,
+               writer->wait_out_time, writer->read_time, writer->write_time,
+               stream_time - writer->wait_out_time - writer->read_time - writer->write_time);
+    }
+
+    free(streamer->nmbf_queue); free(streamer->subgrid_queue);
+    free(streamer->request_queue); free(streamer->subgrid_locks);
+    free(streamer->skip_receive);
+    fftw_free(streamer->subgrid_plan);
+    free(streamer->vis_queue); free(streamer->vis_chunks); free(streamer->writer);
 
 }
 
@@ -1096,9 +1221,6 @@ void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
     num_threads++; // reader thread
     if (wcfg->statsd_socket >= 0) {
         num_threads++; // statistics thread
-    }
-    if (streamer.vis_file >= 0) {
-        num_threads++; // writer thread
     }
     omp_set_num_threads(num_threads);
     printf("Waiting for data (%d threads)...\n", num_threads);
@@ -1121,12 +1243,12 @@ void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
         }
         #pragma omp taskwait // Just to be sure
 
-        // All work is done - signal writer task to exit
+        // All work is done - signal writer tasks to exit
         streamer.finished = true;
-        omp_set_lock(streamer.vis_in_lock + streamer.vis_in_ptr);
-        streamer.vis_tchunk[streamer.vis_in_ptr] = -1;
-        streamer.vis_fchunk[streamer.vis_in_ptr] = -1;
-        omp_unset_lock(streamer.vis_out_lock + streamer.vis_in_ptr);
+        int writer = 0;
+        for (writer = 0; writer < streamer.writer_count; writer++) {
+            omp_unset_lock(&writer_push_slot(streamer.writer + writer, 0, 0, -1, -1)->out_lock);
+        }
     }
 #pragma omp section
     {
@@ -1135,12 +1257,6 @@ void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
         }
     }
 
-#pragma omp section
-    {
-        if (streamer.vis_file >= 0) {
-            streamer_writer_thread(&streamer);
-        }
-    } // #pragma omp section
     } // #pragma omp parallel sections
 
     streamer_free(&streamer, stream_start);
