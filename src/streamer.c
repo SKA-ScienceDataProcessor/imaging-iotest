@@ -15,6 +15,7 @@
 #define FORK_WRITERS
 #ifdef FORK_WRITERS
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <semaphore.h>
 #endif
 
@@ -1159,11 +1160,11 @@ bool streamer_init(struct streamer *streamer,
     streamer->writer_size = streamer->writer_count * sizeof(struct streamer_writer);
     if (streamer->writer_count > 0) {
 #ifdef FORK_WRITERS
-        printf("Using %d writer processes\n");
+        printf("Using %d writer processes\n", streamer->writer_count);
         streamer->writer = mmap(NULL, streamer->writer_size,
                                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 #else
-        printf("Using %d writer threads\n");
+        printf("Using %d writer threads\n", streamer->writer_count);
         streamer->writer = calloc(1, streamer->writer_size);
 #endif
         int i;
