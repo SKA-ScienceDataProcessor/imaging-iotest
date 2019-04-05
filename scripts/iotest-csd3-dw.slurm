@@ -106,6 +106,7 @@ if [ ! -z $outdir ]; then
         mkdir -p $outdir
         rm -f $outdir/out*.h5
     fi
+    df -h $outdir
     sleep 2
 fi
 
@@ -118,5 +119,6 @@ echo "Finish time: `date`"
 # Clean up afterwards
 if [ ! -z "$outdir" -a $SLURM_NODEID = 0 ]; then
     echo -e "\n==================\nCleaning $outdir...\n"
+    df -h $outdir
     rm -f $outdir/out*.h5
 fi

@@ -56,13 +56,24 @@ for out in rank_output.get('',[]):
         else:
             print("Finish Epoch: {:d}".format(epoch))
             print("Duration: {}s".format((time - start_time).total_seconds()))
-            
+            print()
+
+tf_p = re.compile(".*--time=[\+\-\d:.e]+/([\d]+)/([\d]+).+--freq=[\+\-\d:.e]+/([\d]+)/([\d]+)")
+fs_p = re.compile("^[\d\.]+@[^\s]+\s+([^\s]+)\s+([^\s]+)")
 for out in rank_output.get('',[]):
     if out.startswith('OMP') or out.startswith('\(OMP') or \
        out.startswith('numtasks') or out.startswith('++ mpirun'):
         print(out, end='')
     if out.startswith('mpirun'):
-        print("Command:", out)
+        print("Command:", out, end='')
+        match = tf_p.match(out)
+        if match:
+            t_count = int(match.group(1)); t_chunk = int(match.group(2))
+            f_count = int(match.group(3)); f_chunk = int(match.group(4))
+            print("Chunks: %g KiB" % (16 * t_chunk * f_chunk / 1024.))
+    match = fs_p.match(out)
+    if match:
+        print("Storage: %s (%s used)" % (match.group(1), match.group(2)))
 
 # Determine roles
 producers = {}
