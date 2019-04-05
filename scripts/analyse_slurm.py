@@ -80,7 +80,10 @@ producers = {}
 producers_pid = {}
 streamers = {}
 streamers_pid = {}
+writers = {}
+writer_ids = {}
 p = re.compile("(.*) role: (\w*) (\d*)")
+p_w = re.compile("Writer (\d*):")
 for rank, output in rank_output.items():
     for out in output:
         match = p.match(out)
@@ -97,6 +100,13 @@ for rank, output in rank_output.items():
             else:
                 print("Unknown role of %s: %s", rank, role)
             continue
+        match = p_w.match(out)
+        if match:
+            writer_id = int(match.group(1))
+            if not writer_id in writers:
+                writers[writer_id] = []
+                writer_ids[writer_id] = writer_id
+            writers[writer_id].append(out)
 
 producer_ids = list(sorted(producers.keys()))
 streamer_ids = list(sorted(streamers.keys()))
@@ -105,6 +115,8 @@ if show_ranks:
     print("%d Streamers (%s)" % (len(streamers), ", ".join(["%d at %s" % (sid, streamers_pid[sid]) for sid in streamer_ids])))
 else:
     print("%d Producers, %d Streamers" % (len(producers), len(streamers)))
+if len(writers) > 0:
+    print("%d Writer Threads" % len(writers))
 
 # Look for errors
 got_errors = False
@@ -135,18 +147,33 @@ stream_writer_write = {}
 stream_extracts = [
     ("Create", "s", stream_create_time, re.compile("^done in ([\d\.+-e]*)s")),
     ("Stream", "s", stream_stream_time, re.compile("^Streamed for ([\d\.+-e]*)s")),
-    ("\nReceived", " GB", stream_received, re.compile("^Received ([\d\.+-e]*) GB")),
-    ("Written", " GB", stream_written, re.compile("^Written ([\d\.+-e]*) GB")),
-    ("Rewritten", " GB", stream_rewritten, re.compile("^Written .*rewritten ([\d\.+-e]*) GB")),
-    ("\nReceiver Wait", "s", stream_receiver_wait, re.compile("^Receiver: Wait: ([\d\.+-e]*)s")),
-    ("Worker Wait", "s", stream_worker_wait, re.compile("^Worker: Wait: ([\d\.+-e]*)s")),
+    ("Received", " GB", stream_received, re.compile("^Received ([\d\.+-e]*) GB")),
+    ("Receiver Wait", "s", stream_receiver_wait, re.compile("^Receiver: Wait: ([\d\.+-e]*)s")),
+    ("\nWorker Wait", "s", stream_worker_wait, re.compile("^Worker: Wait: ([\d\.+-e]*)s")),
     ("Worker Degrid", "s", {}, re.compile("^Worker: .*Degrid: ([\d\.+-e]*)s")),
     ("Worker Idle", "s", {}, re.compile("^Worker: .*Idle: ([\d\.+-e]*)s")),
-    ("Writer Wait", "s", stream_writer_wait, re.compile("^Writer: Wait: ([\d\.+-e]*)s")),
-    ("Writer Read", "s", stream_writer_read, re.compile("^Writer: .*Read: ([\d\.+-e]*)s")),
-    ("Writer Write", "s", stream_writer_write, re.compile("^Writer: .*Write: ([\d\.+-e]*)s")),
-    ("Degrid rate", "Gflop/s", {}, re.compile("^Operations: degrid ([\d\.+-e]*)")),
+    ("Degrid rate", " Gflop/s", {}, re.compile("^Operations: degrid ([\d\.+-e]*)")),
+    ("Accuracy RMSE", "", {}, re.compile("^Accuracy: RMSE ([\d\.+\-e]*)")),
+    ("Accuracy worst", "", {}, re.compile("^Accuracy: .*worst ([\d\.+-e]*)")),
 ]
+if len(writers) == 0:
+    stream_extracts.extend([
+        ("\nWritten", " GB", stream_written, re.compile("^Written ([\d\.+-e]*) GB")),
+        ("Rewritten", " GB", stream_rewritten, re.compile("^Written .*rewritten ([\d\.+-e]*) GB")),
+        ("Writer Wait", "s", stream_writer_wait, re.compile("^Writer: Wait: ([\d\.+-e]*)s")),
+        ("Writer Read", "s", stream_writer_read, re.compile("^Writer: .*Read: ([\d\.+-e]*)s")),
+        ("Writer Write", "s", stream_writer_write, re.compile("^Writer: .*Write: ([\d\.+-e]*)s")),
+    ])
+    writer_extracts = []
+else:
+    writer_extracts = [
+        ("\nWritten", " GB", stream_written, re.compile("^Writer \d*: ([\d\.+-e]*) GB")),
+        ("Rewritten", " GB", stream_rewritten, re.compile("^Writer \d*: .*rewritten ([\d\.+-e]*) GB")),
+        ("Writer Wait", "s", stream_writer_wait, re.compile("^Writer \d*: Wait: ([\d\.+-e]*)s")),
+        ("Writer Read", "s", stream_writer_read, re.compile("^Writer \d*: .*Read: ([\d\.+-e]*)s")),
+        ("Writer Write", "s", stream_writer_write, re.compile("^Writer \d*: .*Write: ([\d\.+-e]*)s")),
+    ]
+
 producer_extracts = [
     ("PF1", "s", {}, re.compile("^PF1: ([\d\.+-e]*)")),
     ("FT1", "s", {}, re.compile("^PF1:.*FT1: ([\d\.+-e]*)")),
@@ -155,11 +182,17 @@ producer_extracts = [
     ("FT2", "s", {}, re.compile("^PF2:.*FT2: ([\d\.+-e]*)")),
     ("ES2", "s", {}, re.compile("^PF2:.*ES2: ([\d\.+-e]*)")),
 ]
+
 for producer_id, output in producers.items():
     for out in output:
         for _, _, dct, p in producer_extracts:
             m = p.match(out)
             if m: dct[producer_id] = float(m.group(1))
+for writer_id, output in writers.items():
+    for out in output:
+        for _, _, dct, p in writer_extracts:
+            m = p.match(out)
+            if m: dct[writer_id] = float(m.group(1))
 for streamer_id, output in streamers.items():
     for out in output:
         for _, _, dct, p in stream_extracts:
@@ -167,6 +200,7 @@ for streamer_id, output in streamers.items():
             if m: dct[streamer_id] = float(m.group(1))
 
 for extracts, ids, ex_name in [(stream_extracts, streamer_ids, "Streamer"),
+                               (writer_extracts, writer_ids, "Writer"),
                                (producer_extracts, producer_ids, "Producer")]:
   print("\n%s Stats\n-----" % ex_name)
   for name, unit, dct, _ in extracts:
@@ -176,7 +210,8 @@ for extracts, ids, ex_name in [(stream_extracts, streamer_ids, "Streamer"),
     print("%s: %g%s total (%s%g%s min, %g%s max, %g%s average)" % (
         name,
         sum(dct.values()), unit,
-        "" if len(dct.values()) == len(ids) else "%d/%d missing - " % (len(ids) - len(dct.values()), len(ids)),
+        "" if len(dct.values()) == len(ids) else "%d/%d missing - " % (
+            len(ids) - len(dct.values()), len(ids)),
         min(dct.values()), unit,
         max(dct.values()), unit,
         sum(dct.values())/len(dct.values()), unit))
