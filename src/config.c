@@ -585,6 +585,7 @@ void config_init(struct work_config *cfg)
     cfg->vis_chunk_queue_length = 4096;
     cfg->vis_writer_count = 2;
     cfg->vis_fork_writer = false;
+    cfg->vis_check_existing = false;
 
     cfg->statsd_socket = -1;
     cfg->statsd_rate = 1;

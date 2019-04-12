@@ -364,19 +364,24 @@ void *streamer_writer_thread(void *param)
 #pragma omp critical
     {
         // Open file and "vis" group
-        printf("\nCreating %s... ", filename);
-        writer->file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-        writer->group = H5Gcreate(writer->file, "vis", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        if (wcfg->vis_check_existing) {
+            printf("\nOpening %s... ", filename);
+            writer->file = H5Fopen(filename, H5F_ACC_RDONLY, H5P_DEFAULT);
+            writer->group = H5Gopen(writer->file, "vis", H5P_DEFAULT);
+        } else {
+            printf("\nCreating %s... ", filename);
+            writer->file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+            if (writer->file >= 0)
+                writer->group = H5Gcreate(writer->file, "vis", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+            // Create baseline groups
+            if (writer->file >= 0 && writer->group >= 0)
+                create_bl_groups(writer->group, wcfg, writer->subgrid_worker);
+        }
     }
+
     if (writer->file < 0 || writer->group < 0) {
         fprintf(stderr, "Could not open visibility file %s!\n", filename);
         return NULL;
-    }
-
-    // Create baseline groups
-#pragma omp critical
-    {
-    create_bl_groups(writer->group, wcfg, writer->subgrid_worker);
     }
 
     int time_chunk_count = spec->time_count / spec->time_chunk;
@@ -413,7 +418,7 @@ void *streamer_writer_thread(void *param)
         // just fill the buffer with zeroes.
         int chunk_index = ((bl_data.antenna2 * spec->cfg->ant_count + bl_data.antenna1)
                            * time_chunk_count + chunk->tchunk) * freq_chunk_count + chunk->fchunk;
-        if (chunks_written[chunk_index]) {
+        if (wcfg->vis_check_existing || chunks_written[chunk_index]) {
             read_vis_chunk(writer->group, &bl_data,
                            spec->time_chunk, spec->freq_chunk,
                            chunk->tchunk, chunk->fchunk,
@@ -422,28 +427,49 @@ void *streamer_writer_thread(void *param)
             memset(vis_data_h5, 0, vis_data_size);
         }
         writer->read_time += get_time_ns() - start;
-
-        // Copy over data
         start = get_time_ns();
-        int i;
-        for (i = 0; i < spec->time_chunk * spec->freq_chunk; i++) {
-            if (vis_data[i] != 0) {
-                // Make sure we never over-write data!
-                assert(vis_data_h5[i] == 0);
-                vis_data_h5[i] = vis_data[i];
+
+        if (wcfg->vis_check_existing) {
+
+            // Compare data
+            int i;
+            for (i = 0; i < spec->time_chunk * spec->freq_chunk; i++) {
+                if (vis_data[i] != 0) {
+                    if (cabs(vis_data_h5[i] - vis_data[i]) > 1e-12) {
+                        printf("%g%+gj != %g%+gj (diff %g)!\n",
+                               creal(vis_data_h5[i]), cimag(vis_data_h5[i]),
+                               creal(vis_data[i]), cimag(vis_data[i]),
+                               cabs(vis_data_h5[i] - vis_data[i]));
+                    }
+                }
             }
-        }
-
-        // Write chunk back
-        write_vis_chunk(writer->group, &bl_data,
-                        spec->time_chunk, spec->freq_chunk,
-                        chunk->tchunk, chunk->fchunk,
-                        vis_data_h5);
-
-        writer->written_vis_data += vis_data_size;
-        if (chunks_written[chunk_index])
             writer->rewritten_vis_data += vis_data_size;
-        chunks_written[chunk_index] = true;
+
+        } else {
+
+            // Copy over data
+            start = get_time_ns();
+            int i;
+            for (i = 0; i < spec->time_chunk * spec->freq_chunk; i++) {
+                if (vis_data[i] != 0) {
+                    // Make sure we never over-write data!
+                    assert(vis_data_h5[i] == 0);
+                    vis_data_h5[i] = vis_data[i];
+                }
+            }
+
+            // Write chunk back
+            write_vis_chunk(writer->group, &bl_data,
+                            spec->time_chunk, spec->freq_chunk,
+                            chunk->tchunk, chunk->fchunk,
+                            vis_data_h5);
+
+            writer->written_vis_data += vis_data_size;
+            if (chunks_written[chunk_index])
+                writer->rewritten_vis_data += vis_data_size;
+            chunks_written[chunk_index] = true;
+
+        }
 
         free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
 

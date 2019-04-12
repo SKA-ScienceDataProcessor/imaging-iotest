@@ -272,6 +272,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"visibility-queue", required_argument, 0, Opt_visibility_queue },
         {"writer-count",required_argument,0, Opt_writer_count },
         {"fork-writer",no_argument,       &cfg->vis_fork_writer, true },
+        {"check-existing",no_argument,    &cfg->vis_check_existing, true },
 
         {"statsd",     optional_argument, 0, Opt_statsd },
         {"statsd-port",required_argument, 0, Opt_statsd_port },

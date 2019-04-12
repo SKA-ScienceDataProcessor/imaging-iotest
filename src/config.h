@@ -100,6 +100,7 @@ struct work_config {
     int vis_chunk_queue_length;
     int vis_writer_count;
     int vis_fork_writer;
+    int vis_check_existing;
 
     // Statsd connection
     int statsd_socket;
