@@ -12,12 +12,9 @@
 #include <float.h>
 #include <pthread.h>
 
-#define FORK_WRITERS
-#ifdef FORK_WRITERS
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <semaphore.h>
-#endif
 
 #ifndef NO_MPI
 #include <mpi.h>
@@ -29,11 +26,7 @@
 struct streamer_chunk
 {
     int a1, a2, tchunk, fchunk;
-#ifdef FORK_WRITERS
     sem_t in_lock, out_lock; // Ready to fill / write to disk
-#else
-    omp_lock_t in_lock, out_lock; // Ready to fill / write to disk
-#endif
     double complex *vis;
 };
 
@@ -43,11 +36,8 @@ struct streamer_writer
     // Index of worker, and writer (unique across distributed program)
     int subgrid_worker;
     int index;
-#ifdef FORK_WRITERS
-    pid_t pid;
-#else
-    pthread_t thread;
-#endif
+    pid_t pid; // if forking writers
+    pthread_t thread; // if not forking writers
 
     // Visibility file
     hid_t file, group;
@@ -156,11 +146,7 @@ struct streamer_chunk *writer_push_slot(struct streamer_writer *writer,
     struct streamer_chunk *chunk = writer->queue + vis_slot;
 #pragma omp atomic
     writer->to_write += 1;
-#ifdef FORK_WRITERS
     sem_wait(&chunk->in_lock);
-#else
-    omp_set_lock(&chunk->in_lock);
-#endif
 
     // Set slot data
     chunk->a1 = a1;
@@ -404,11 +390,7 @@ void *streamer_writer_thread(void *param)
         // Obtain "out" lock for writing out visibilities
         double start = get_time_ns();
         struct streamer_chunk *chunk = writer->queue + writer->out_ptr;
-#ifdef FORK_WRITERS
         sem_wait(&chunk->out_lock);
-#else
-        omp_set_lock(&chunk->out_lock);
-#endif
         writer->wait_out_time += get_time_ns() - start;
 
         start = get_time_ns();
@@ -420,11 +402,7 @@ void *streamer_writer_thread(void *param)
         if (chunk->tchunk == -2 && chunk->fchunk == -2) {
             #pragma omp atomic
                 writer->to_write -= 1;
-#ifdef FORK_WRITERS
             sem_post(&chunk->in_lock);
-#else
-            omp_unset_lock(&chunk->in_lock);
-#endif
             writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
             continue; // Signal to ignore chunk
         }
@@ -472,11 +450,7 @@ void *streamer_writer_thread(void *param)
         // Release "in" lock to mark the slot free for writing
         #pragma omp atomic
             writer->to_write -= 1;
-#ifdef FORK_WRITERS
         sem_post(&chunk->in_lock);
-#else
-        omp_unset_lock(&chunk->in_lock);
-#endif
         writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
         writer->write_time += get_time_ns() - start;
 
@@ -702,11 +676,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
         }
 
         // Signal slot for output
-#ifdef FORK_WRITERS
         sem_post(&chunk->out_lock);
-#else
-        omp_unset_lock(&chunk->out_lock);
-#endif
     }
 
     return true;
@@ -1080,14 +1050,12 @@ bool streamer_init(struct streamer *streamer,
     streamer->queue_length = wcfg->vis_subgrid_queue_length;
     streamer->vis_queue_length = wcfg->vis_chunk_queue_length;
     streamer->writer_count = (wcfg->vis_path ? wcfg->vis_writer_count : 0);
-#ifndef FORK_WRITERS
     hbool_t hdf5_threadsafe;
     H5is_library_threadsafe(&hdf5_threadsafe);
-    if (streamer->writer_count > 1 && !hdf5_threadsafe) {
+    if (!wcfg->vis_fork_writer && streamer->writer_count > 1 && !hdf5_threadsafe) {
         fprintf(stderr, "WARNING: libhdf5 is not thread safe, using only one writer thread!\n");
         streamer->writer_count = 1;
     }
-#endif
     if (streamer->writer_count > 0) {
         streamer->vis_queue_per_writer = streamer->vis_queue_length / streamer->writer_count;
     } else {
@@ -1140,15 +1108,15 @@ bool streamer_init(struct streamer *streamer,
     // Allocate visibility queue
     streamer->vis_queue_size = (size_t)streamer->vis_queue_length * vis_data_size;
     streamer->vis_chunks_size = (size_t)streamer->vis_queue_length * sizeof(struct streamer_chunk);
-#ifdef FORK_WRITERS
-    streamer->vis_queue = mmap(NULL, streamer->vis_queue_size,
-                               PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    streamer->vis_chunks = mmap(NULL, streamer->vis_chunks_size,
-                                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-#else
-    streamer->vis_queue = malloc((size_t)streamer->vis_queue_length * vis_data_size);
-    streamer->vis_chunks = malloc((size_t)streamer->vis_queue_length * sizeof(struct streamer_chunk));
-#endif
+    if (wcfg->vis_fork_writer) {
+        streamer->vis_queue = mmap(NULL, streamer->vis_queue_size,
+                                   PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        streamer->vis_chunks = mmap(NULL, streamer->vis_chunks_size,
+                                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    } else {
+        streamer->vis_queue = malloc((size_t)streamer->vis_queue_length * vis_data_size);
+        streamer->vis_chunks = malloc((size_t)streamer->vis_queue_length * sizeof(struct streamer_chunk));
+    }
     if (!streamer->vis_queue || !streamer->vis_chunks) {
 
         fprintf(stderr, "ERROR: Could not allocate visibility queue!\n");
@@ -1159,14 +1127,14 @@ bool streamer_init(struct streamer *streamer,
     streamer->writer = NULL;
     streamer->writer_size = streamer->writer_count * sizeof(struct streamer_writer);
     if (streamer->writer_count > 0) {
-#ifdef FORK_WRITERS
-        printf("Using %d writer processes\n", streamer->writer_count);
-        streamer->writer = mmap(NULL, streamer->writer_size,
-                                PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-#else
-        printf("Using %d writer threads\n", streamer->writer_count);
-        streamer->writer = calloc(1, streamer->writer_size);
-#endif
+        if (wcfg->vis_fork_writer) {
+            printf("Using %d writer processes\n", streamer->writer_count);
+            streamer->writer = mmap(NULL, streamer->writer_size,
+                                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        } else {
+            printf("Using %d writer threads\n", streamer->writer_count);
+            streamer->writer = calloc(1, streamer->writer_size);
+        }
         int i;
         for (i = 0; i < streamer->writer_count; i++) {
             struct streamer_writer *writer = streamer->writer + i;
@@ -1180,27 +1148,22 @@ bool streamer_init(struct streamer *streamer,
             writer->queue = streamer->vis_chunks + i * streamer->vis_queue_per_writer;
             int j;
             for (j = 0; j < streamer->vis_queue_per_writer; j++) {
-#ifdef FORK_WRITERS
-                sem_init(&writer->queue[j].in_lock, 1, 1);
-                sem_init(&writer->queue[j].out_lock, 1, 0);
-#else
-                omp_init_lock(&writer->queue[j].in_lock);
-                omp_init_lock(&writer->queue[j].out_lock);
-                omp_set_lock(&writer->queue[j].out_lock);
-#endif
+                sem_init(&writer->queue[j].in_lock, wcfg->vis_fork_writer, 1);
+                sem_init(&writer->queue[j].out_lock, wcfg->vis_fork_writer, 0);
                 writer->queue[j].vis = streamer->vis_queue +
                     spec->time_chunk * spec->freq_chunk * (i * streamer->vis_queue_per_writer + j);
             }
 
-#ifdef FORK_WRITERS
-            writer->pid = fork();
-            if (!writer->pid) {
-                streamer_writer_thread(writer);
-                exit(0);
+            // Now either fork the writer or start a thread
+            if (wcfg->vis_fork_writer) {
+                writer->pid = fork();
+                if (!writer->pid) {
+                    streamer_writer_thread(writer);
+                    exit(0);
+                }
+            } else {
+                pthread_create(&writer->thread, NULL, streamer_writer_thread, writer);
             }
-#else
-            pthread_create(&writer->thread, NULL, streamer_writer_thread, writer);
-#endif
         }
     }
 
@@ -1217,11 +1180,11 @@ void streamer_free(struct streamer *streamer,
         printf("Finishing writes...\n");
         for (i = 0; i < streamer->writer_count; i++) {
             struct streamer_writer *writer = streamer->writer + i;
-#ifdef FORK_WRITERS
-            waitpid(writer->pid, NULL, 0);
-#else
-            pthread_join(writer->thread, NULL);
-#endif
+            if (streamer->work_cfg->vis_fork_writer) {
+                waitpid(writer->pid, NULL, 0);
+            } else {
+                pthread_join(writer->thread, NULL);
+            }
         }
     }
 
@@ -1259,13 +1222,8 @@ void streamer_free(struct streamer *streamer,
 
         int j;
         for (j = 0; j < streamer->vis_queue_per_writer; j++) {
-#ifdef FORK_WRITERS
             sem_destroy(&writer->queue[j].in_lock);
             sem_destroy(&writer->queue[j].out_lock);
-#else
-            omp_destroy_lock(&writer->queue[j].in_lock);
-            omp_destroy_lock(&writer->queue[j].out_lock);
-#endif
         }
 
         // Then print stats. The above join can hang a bit as data
@@ -1286,16 +1244,16 @@ void streamer_free(struct streamer *streamer,
     free(streamer->request_queue); free(streamer->subgrid_locks);
     free(streamer->skip_receive);
     fftw_free(streamer->subgrid_plan);
-#ifdef FORK_WRITERS
-    munmap(streamer->vis_queue, streamer->vis_queue_size);
-    munmap(streamer->vis_chunks, streamer->vis_chunks_size);
-    if (streamer->writer) {
-        munmap(streamer->writer, streamer->writer_size);
+    if (streamer->work_cfg->vis_fork_writer) {
+        munmap(streamer->vis_queue, streamer->vis_queue_size);
+        munmap(streamer->vis_chunks, streamer->vis_chunks_size);
+        if (streamer->writer) {
+            munmap(streamer->writer, streamer->writer_size);
+        }
+    } else {
+        free(streamer->vis_queue); free(streamer->vis_chunks);
+        free(streamer->writer);
     }
-#else
-    free(streamer->vis_queue); free(streamer->vis_chunks);
-    free(streamer->writer);
-#endif
 
 }
 
@@ -1343,11 +1301,7 @@ void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
         int writer = 0;
         for (writer = 0; writer < streamer.writer_count; writer++) {
             struct streamer_chunk *slot = writer_push_slot(streamer.writer + writer, 0, 0, -1, -1);
-#ifdef FORK_WRITERS
             sem_post(&slot->out_lock);
-#else
-            omp_unset_lock(&slot->out_lock);
-#endif
         }
     }
 #pragma omp section

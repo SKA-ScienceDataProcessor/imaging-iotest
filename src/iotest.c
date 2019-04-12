@@ -271,6 +271,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"task-queue", required_argument, 0, Opt_task_queue },
         {"visibility-queue", required_argument, 0, Opt_visibility_queue },
         {"writer-count",required_argument,0, Opt_writer_count },
+        {"fork-writer",no_argument,       &cfg->vis_fork_writer, true },
 
         {"statsd",     optional_argument, 0, Opt_statsd },
         {"statsd-port",required_argument, 0, Opt_statsd_port },
@@ -436,7 +437,7 @@ bool set_cmdarg_config(int argc, char **argv,
             break;
         case '?':
         default:
-            invalid=true; fprintf(stderr, "ERROR: Unknown option '%s'!\n", argv[opterr]);
+            invalid=true; fprintf(stderr, "ERROR: Unknown option!\n");
             break;
         }
     }
@@ -474,6 +475,8 @@ bool set_cmdarg_config(int argc, char **argv,
         printf("  --freq=<start>:<end>/<steps>[/<chunk>]  Set frequency channels (in Hz).\n");
         printf("  --grid=<x0>,<path>     Gridding function to use\n");
         printf("  --vis=[vlaa/ska_low]   Use standard configuration sets\n");
+        printf("  --writer-count=<val>   Number of parallel writers per process\n");
+        printf("  --fork-writer          Fork separate processes for writers\n");
         printf("\n");
         printf("Recombination Parameters:\n");
         printf("  --recombine=<N>,<Ny>,<yBs>,<yNs>,<yPs>,<xAs>,<xMs>,<xMxMyPs>\n");
