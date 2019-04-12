@@ -16,6 +16,13 @@ struct vis_spec
     double dec_sin, dec_cos;
 };
 
+inline static int spec_time_chunks(struct vis_spec *spec) {
+    return (spec->time_count + spec->time_chunk - 1) / spec->time_chunk;
+}
+inline static int spec_freq_chunks(struct vis_spec *spec) {
+    return (spec->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
+}
+
 void bl_bounding_box(struct vis_spec *spec,
                      int a1, int a2,
                      int tstep0, int tstep1,
@@ -34,8 +41,9 @@ struct facet_work
 // Work to do for a subgrid on a baseline
 struct subgrid_work_bl
 {
-    int a1, a2;
-    int chunks;
+    int a1, a2; // Baseline antennas
+    int chunks; // Number of (time,frequency) chunks overlapping
+    int sg_min_u, sg_max_u, sg_min_v, sg_max_v; // Subgrid bounds of baseline
     struct subgrid_work_bl *next;
 };
 
@@ -97,6 +105,15 @@ struct work_config {
     int statsd_socket;
     double statsd_rate;
 };
+
+// Return size of total grid in wavelengths
+inline static double config_lambda(const struct work_config *cfg) {
+    return cfg->recombine.image_size / cfg->theta;
+}
+// Return size of a subgrid as fraction of the entire grid
+inline static double config_xA(const struct work_config *cfg) {
+    return (double)cfg->recombine.xA_size / cfg->recombine.image_size;
+}
 
 double get_time_ns();
 

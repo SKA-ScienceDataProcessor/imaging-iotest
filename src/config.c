@@ -90,9 +90,8 @@ static int compare_prio_nbl(const void *_w1, const void *_w2)
     return w1->nbl > w2->nbl;
 }
 
-static void bin_baseline(struct vis_spec *spec, double lam, double xA,
-                         int *nbl, struct subgrid_work_bl **bls, int nsubgrid,
-                         int a1, int a2, int iu, int iv)
+static int bin_baseline(struct vis_spec *spec, double lam, double xA, int nsubgrid,
+                        int a1, int a2, int iu, int iv)
 {
     assert (iu >= 0 && iu < nsubgrid);
     assert (iv >= 0 && iv < nsubgrid);
@@ -102,11 +101,24 @@ static void bin_baseline(struct vis_spec *spec, double lam, double xA,
     double sg_min_v = lam * (xA*(iv-nsubgrid/2) - xA/2);
     double sg_max_u = lam * (xA*(iu-nsubgrid/2) + xA/2);
     double sg_max_v = lam * (xA*(iv-nsubgrid/2) + xA/2);
-    int ntchunk = (spec->time_count + spec->time_chunk - 1) / spec->time_chunk;
-    int nfchunk = (spec->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
+    int ntchunk = spec_time_chunks(spec);
+    int nfchunk = spec_freq_chunks(spec);
 
     // Count number of overlapping chunks
     for (tchunk = 0; tchunk < ntchunk; tchunk++) {
+
+        // Check whether time chunk fall into positive u. We use this
+        // for deciding whether coordinates are going to get flipped
+        // for the entire chunk. This is assuming that a chunk is
+        // never big enough that we would overlap an extra subgrid
+        // into the negative direction.
+        int tstep_mid = tchunk * spec->time_chunk + spec->time_chunk / 2;
+        double uvw_mid[3];
+        ha_to_uvw_sc(spec->cfg, a1, a2,
+                     spec->ha_sin[tstep_mid], spec->ha_cos[tstep_mid],
+                     spec->dec_sin, spec->dec_cos,
+                     uvw_mid);
+        bool positive_u = uvw_mid[0] >= 0;
 
         // Check frequencies. We adjust step length exponentially so
         // we can jump over non-matching space quicker, see
@@ -123,13 +135,18 @@ static void bin_baseline(struct vis_spec *spec, double lam, double xA,
                             fchunk * spec->freq_chunk,
                             fmin(spec->freq_count, (fchunk+fstep) * spec->freq_chunk) - 1,
                             uvw_l_min, uvw_l_max);
-            //printf("u: sg %g-%g chunk %g-%g\n", sg_min_u, sg_max_u, uvw_l_min[0], uvw_l_max[0]);
-            //printf("v: sg %g-%g chunk %g-%g\n", sg_min_v, sg_max_v, uvw_l_min[1], uvw_l_max[1]);
 
-            if ((uvw_l_min[0] < sg_max_u && uvw_l_max[0] > sg_min_u &&
-                 uvw_l_min[1] < sg_max_v && uvw_l_max[1] > sg_min_v) ||
-                (-uvw_l_max[0] < sg_max_u && -uvw_l_min[0] > sg_min_u &&
-                 -uvw_l_max[1] < sg_max_v && -uvw_l_min[1] > sg_min_v)) {
+            // Chunk is at negative coordinates?
+            if (!positive_u) {
+                int i;
+                for (i = 0; i < 3; i++) {
+                    uvw_l_min[i] = -uvw_l_min[i];
+                    uvw_l_max[i] = -uvw_l_max[i];
+                }
+            }
+
+            if (uvw_l_min[0] < sg_max_u && uvw_l_max[0] > sg_min_u &&
+                uvw_l_min[1] < sg_max_v && uvw_l_max[1] > sg_min_v) {
 
                 if (fstep == 1) {
                     // Found a chunk
@@ -147,38 +164,18 @@ static void bin_baseline(struct vis_spec *spec, double lam, double xA,
         }
     }
 
-    if (!chunks)
-        return;
-
-    // Count
-    nbl[iv*nsubgrid + iu]+=chunks;
-
-    // Make sure we don't add a baseline twice
-    if (bls[iv * nsubgrid + iu]) {
-        assert(bls[iv * nsubgrid + iu]->a1 != a1 ||
-               bls[iv * nsubgrid + iu]->a2 != a2);
-    }
-
-    // Add work structure
-    struct subgrid_work_bl *wbl = (struct subgrid_work_bl *)
-        malloc(sizeof(struct subgrid_work_bl));
-    wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
-    wbl->next = bls[iv * nsubgrid + iu];
-    bls[iv * nsubgrid + iu] = wbl;
+    return chunks;
 }
 
 // Bin baselines per overlapping subgrid
 static int collect_baselines(struct vis_spec *spec,
                              double lam, double xA,
-                             int **pnbl, struct subgrid_work_bl ***pbls,
+                             int **pnchunks, struct subgrid_work_bl ***pbls,
                              bool dump_baselines)
 {
 
     // Determine number of subgrid bins we need
-    int nsubgrid = 2 * (int)ceil(1. / 2 / xA) + 1;
-    int *nbl = (int *)calloc(sizeof(int), nsubgrid * nsubgrid);
-    struct subgrid_work_bl **bls = (struct subgrid_work_bl **)
-        calloc(sizeof(struct subgrid_work_bl *), nsubgrid * nsubgrid);
+    int nsubgrid = 2 * (int)ceil(1. / 2 / xA) + 3;
 
     // Determine baseline bounding boxes
     int nbl_total = spec->cfg->ant_count * (spec->cfg->ant_count - 1) / 2;
@@ -191,24 +188,52 @@ static int collect_baselines(struct vis_spec *spec,
         }
     }
 
+    // Allocate chunk statistics
+    int *nchunks = (int *)calloc(sizeof(int), nsubgrid * nsubgrid);
+    struct subgrid_work_bl **bls = (struct subgrid_work_bl **)
+        calloc(sizeof(struct subgrid_work_bl *), nsubgrid * nsubgrid);
     int iv, iu;
 #pragma omp parallel for collapse(2) schedule(dynamic,8)
     for (iv = 0; iv < nsubgrid; iv++) {
-        for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
+        for (iu = 0; iu < nsubgrid; iu++) {
             int a1, a2, bl=0;
             for (a1 = 0; a1 < spec->cfg->ant_count; a1++) {
                 for (a2 = a1+1; a2 < spec->cfg->ant_count; a2++, bl++) {
                     int *sg_min = sg_mins + bl * 2, *sg_max = sg_maxs + bl * 2;
-                    if (iv >= nsubgrid/2+sg_min[1] && iv <= nsubgrid/2+sg_max[1] &&
-                        iu >= nsubgrid/2+sg_min[0] && iu <= nsubgrid/2+sg_max[0]) {
 
-                        bin_baseline(spec, lam, xA, nbl, bls, nsubgrid, a1, a2, iu, iv);
+                    // Bounds check
+                    if (!(iv >= nsubgrid/2+sg_min[1] && iv <= nsubgrid/2+sg_max[1] &&
+                          iu >= nsubgrid/2+sg_min[0] && iu <= nsubgrid/2+sg_max[0]) &&
+                        !(iv >= nsubgrid/2-sg_max[1] && iv <= nsubgrid/2-sg_min[1] &&
+                          iu >= nsubgrid/2-sg_max[0] && iu <= nsubgrid/2-sg_min[0]))
+                        continue;
 
-                    } else if(iv >= nsubgrid/2-sg_max[1] && iv <= nsubgrid/2-sg_min[1] &&
-                              iu >= nsubgrid/2-sg_max[0] && iu <= nsubgrid/2-sg_min[0]) {
+                    // Count actual number of chunks
+                    int chunks = bin_baseline(spec, lam, xA, nsubgrid,
+                                              a1, a2, iu, iv);
+                    if (!chunks)
+                        continue;
 
-                        bin_baseline(spec, lam, xA, nbl, bls, nsubgrid, a1, a2, iu, iv);
+                    // Sum up
+                    nchunks[iv*nsubgrid + iu]+=chunks;
+
+                    // Make sure we don't add a baseline twice
+                    if (bls[iv * nsubgrid + iu]) {
+                        assert(bls[iv * nsubgrid + iu]->a1 != a1 ||
+                               bls[iv * nsubgrid + iu]->a2 != a2);
                     }
+
+                    // Add work structure
+                    struct subgrid_work_bl *wbl = (struct subgrid_work_bl *)
+                        malloc(sizeof(struct subgrid_work_bl));
+                    wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
+                    wbl->next = bls[iv * nsubgrid + iu];
+                    wbl->sg_min_u = sg_min[0];
+                    wbl->sg_min_v = sg_min[1];
+                    wbl->sg_max_u = sg_max[0];
+                    wbl->sg_max_v = sg_max[1];
+                    bls[iv * nsubgrid + iu] = wbl;
+
                 }
             }
         }
@@ -233,7 +258,7 @@ static int collect_baselines(struct vis_spec *spec,
         printf("---\n");
     }
 
-    *pnbl = nbl;
+    *pnchunks = nchunks;
     *pbls = bls;
     return nsubgrid;
 }
@@ -262,25 +287,24 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
 {
     struct vis_spec *spec = &cfg->spec;
 
-    // Count visibilities per sub-grid
-    double xA = (double)cfg->recombine.xA_size / cfg->recombine.image_size;
-    int *nbl; struct subgrid_work_bl **bls;
 
     printf("Covering %d time steps, %d channels, %d baselines\n",
            cfg->spec.time_count, cfg->spec.freq_count,
            cfg->spec.cfg->ant_count * (cfg->spec.cfg->ant_count - 1) / 2);
 
+    // Count visibilities per sub-grid
     printf("Binning chunks...\n");
+    int *nbl; struct subgrid_work_bl **bls;
     double start = get_time_ns();
-    int nsubgrid = collect_baselines(spec, cfg->recombine.image_size / cfg->theta,
-                                     xA, &nbl, &bls, cfg->config_dump_baseline_bins);
+    int nsubgrid = collect_baselines(spec, config_lambda(cfg), config_xA(cfg),
+                                     &nbl, &bls, cfg->config_dump_baseline_bins);
     printf(" %g s\n", get_time_ns() - start);
 
     // Count how many sub-grids actually have visibilities
     int npop = 0, nbl_total = 0, nbl_max = 0;
     int iu, iv;
     for (iv = 0; iv < nsubgrid; iv++) {
-        for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
+        for (iu = 0; iu < nsubgrid; iu++) {
             if (nbl[iv * nsubgrid + iu]) {
                 npop++;
                 nbl_total+=nbl[iv * nsubgrid + iu];
@@ -305,7 +329,7 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
     // column. Note that we ignore grid data at u < 0, as transferring
     // half the grid is enough to reconstruct a real-valued image.
     int nwork = 0, max_work_column = 0;
-    for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
+    for (iu = 0; iu < nsubgrid; iu++) {
         int nwork_start = nwork;
         for (iv = 0; iv < nsubgrid; iv++) {
             int nv = nbl[iv * nsubgrid + iu];
@@ -332,7 +356,7 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
 
     // Go through columns and assign work
     int iworker = 0, iwork = 0;
-    for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
+    for (iu = 0; iu < nsubgrid; iu++) {
 
         // Generate column of work
         int start_bl;

@@ -381,9 +381,9 @@ void *streamer_writer_thread(void *param)
 
     int time_chunk_count = spec->time_count / spec->time_chunk;
     int freq_chunk_count = spec->freq_count / spec->freq_chunk;
-    int bl_count = spec->cfg->ant_count * spec->cfg->ant_count
+    int chunk_count = spec->cfg->ant_count * spec->cfg->ant_count
         * time_chunk_count * freq_chunk_count;
-    bool *bls_written = calloc(sizeof(bool), bl_count);
+    bool *chunks_written = calloc(sizeof(bool), chunk_count);
 
     for(;;) {
 
@@ -413,7 +413,7 @@ void *streamer_writer_thread(void *param)
         // just fill the buffer with zeroes.
         int chunk_index = ((bl_data.antenna2 * spec->cfg->ant_count + bl_data.antenna1)
                            * time_chunk_count + chunk->tchunk) * freq_chunk_count + chunk->fchunk;
-        if (bls_written[chunk_index]) {
+        if (chunks_written[chunk_index]) {
             read_vis_chunk(writer->group, &bl_data,
                            spec->time_chunk, spec->freq_chunk,
                            chunk->tchunk, chunk->fchunk,
@@ -441,9 +441,9 @@ void *streamer_writer_thread(void *param)
                         vis_data_h5);
 
         writer->written_vis_data += vis_data_size;
-        if (bls_written[chunk_index])
+        if (chunks_written[chunk_index])
             writer->rewritten_vis_data += vis_data_size;
-        bls_written[chunk_index] = true;
+        chunks_written[chunk_index] = true;
 
         free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
 
@@ -518,14 +518,14 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
             double u = uvw_lambda(bl_data, time, freq, 0);
             double v = uvw_lambda(bl_data, time, freq, 1);
             double complex vis_out;
-            if (u >= fmax(min_u, 0) && u < max_u &&
+            if (u >= min_u && u < max_u &&
                 v >= min_v && v < max_v) {
 
                 // Degrid normal
                 vis_out = degrid_conv_uv(subgrid, subgrid_size, theta,
                                          u-mid_u, v-mid_v, &streamer->kern, &flops);
 
-            } else if (-u >= fmax(min_u, DBL_MIN) && -u < max_u &&
+            } else if (-u >= min_u && -u < max_u &&
                        -v >= min_v && -v < max_v) {
 
                 // Degrid conjugate at negative coordinate
@@ -600,6 +600,9 @@ bool streamer_degrid_chunk(struct streamer *streamer,
 
     double start = get_time_ns();
 
+    // Calculate subgrid boundaries. TODO: All of this duplicates
+    // logic that also appears in config.c (bin_baseline). This is
+    // brittle, should get refactored at some point!
     double sg_mid_u = work->subgrid_off_u / theta;
     double sg_mid_v = work->subgrid_off_v / theta;
     double sg_min_u = (work->subgrid_off_u - cfg->xA_size / 2) / theta;
@@ -631,12 +634,26 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     double max_u = max(max(uvw0[0]*f0, uvw0[0]*f1), max(uvw1[0]*f0, uvw1[0]*f1));
     double max_v = max(max(uvw0[1]*f0, uvw0[1]*f1), max(uvw1[1]*f0, uvw1[1]*f1));
 
+    // Check whether time chunk fall into positive u. We use this
+    // for deciding whether coordinates are going to get flipped
+    // for the entire chunk. This is assuming that a chunk is
+    // never big enough that we would overlap an extra subgrid
+    // into the negative direction.
+    int tstep_mid = (it0 + it1) / 2;
+    double uvw_mid[3];
+    ha_to_uvw_sc(spec->cfg, bl->a1, bl->a2,
+                 spec->ha_sin[tstep_mid], spec->ha_cos[tstep_mid],
+                 spec->dec_sin, spec->dec_cos,
+                 uvw_mid);
+    bool positive_u = uvw_mid[0] >= 0;
+    if (!positive_u) {
+        min_u *= -1; min_v *= -1;
+        max_u *= -1; max_v *= -1;
+    }
+
     // Check for overlap between baseline chunk and subgrid
-    bool overlap = min_u < sg_max_u && max_u > sg_min_u &&
-                   min_v < sg_max_v && max_v > sg_min_v;
-    bool inv_overlap = -max_u < sg_max_u && -min_u > sg_min_u &&
-                       -max_v < sg_max_v && -min_v > sg_min_v;
-    if (!overlap && !inv_overlap)
+    if (!(min_u < sg_max_u && max_u > sg_min_u &&
+          min_v < sg_max_v && max_v > sg_min_v))
         return false;
 
     // Determine least busy writer
