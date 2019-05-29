@@ -673,8 +673,9 @@ bool streamer_degrid_chunk(struct streamer *streamer,
                  uvw_mid);
     bool positive_u = uvw_mid[0] >= 0;
     if (!positive_u) {
-        min_u *= -1; min_v *= -1;
-        max_u *= -1; max_v *= -1;
+        double swap;
+        swap = min_u; min_u = -max_u; max_u = -swap;
+        swap = min_v; min_v = -max_v; max_v = -swap;
     }
 
     // Check for overlap between baseline chunk and subgrid

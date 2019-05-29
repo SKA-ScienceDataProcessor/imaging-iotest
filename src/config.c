@@ -140,8 +140,9 @@ static int bin_baseline(struct vis_spec *spec, double lam, double xA, int nsubgr
             if (!positive_u) {
                 int i;
                 for (i = 0; i < 3; i++) {
-                    uvw_l_min[i] = -uvw_l_min[i];
-                    uvw_l_max[i] = -uvw_l_max[i];
+                    double swap = uvw_l_min[i];
+                    uvw_l_min[i] = -uvw_l_max[i];
+                    uvw_l_max[i] = -swap;
                 }
             }
 
