@@ -225,7 +225,8 @@ enum Opts
     {
         Opt_flag = 0,
 
-        Opt_telescope, Opt_fov, Opt_dec, Opt_time, Opt_freq, Opt_grid, Opt_vis_set,
+        Opt_telescope, Opt_fov, Opt_dec, Opt_time, Opt_freq,
+        Opt_grid, Opt_grid_x0, Opt_vis_set,
         Opt_recombine, Opt_rec_aa, Opt_rec_set,
         Opt_rec_load_facet, Opt_rec_load_facet_hdf5, Opt_batch_rows,
         Opt_facet_workers, Opt_parallel_cols, Opt_dont_retain_bf,
@@ -249,6 +250,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"time",       required_argument, 0, Opt_time },
         {"freq",       required_argument, 0, Opt_freq },
         {"grid",       required_argument, 0, Opt_grid },
+        {"grid-x0",    required_argument, 0, Opt_grid_x0 },
         {"vis-set",    required_argument, 0, Opt_vis_set},
         {"add-meta",   no_argument,       &cfg->vis_skip_metadata, false },
         {"dump-baseline-bins", no_argument, &cfg->config_dump_baseline_bins, true },
@@ -289,6 +291,7 @@ bool set_cmdarg_config(int argc, char **argv,
     double subgrid_threshold = 1e-8, subgrid_fct_threshold = 1e-8,
            subgrid_degrid_threshold = 1e-8;
     int facet_workers = (world_size + 1) / 2;
+    double gridder_x0 = 0;
     char gridder_path[256]; char vis_path[256];
     char statsd_addr[256]; char statsd_port[256] = "8125";
     memset(&spec, 0, sizeof(spec));
@@ -336,8 +339,13 @@ bool set_cmdarg_config(int argc, char **argv,
             break;
         case Opt_grid:
             nscan = sscanf(optarg, "%255s", gridder_path);
-            printf("Got grid\n");
-            if (nscan < 2) {
+            if (nscan < 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid' option!\n");
+            }
+            break;
+        case Opt_grid_x0:
+            nscan = sscanf(optarg, "%g", &gridder_x0);
+            if (nscan < 1) {
                 invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid' option!\n");
             }
             break;
@@ -474,7 +482,8 @@ bool set_cmdarg_config(int argc, char **argv,
         printf("  --dec=<val>            Set source declination (default 90 degrees)\n");
         printf("  --time=<start>:<end>/<steps>[/<chunk>]  Set dump times (hour angle, in s)\n");
         printf("  --freq=<start>:<end>/<steps>[/<chunk>]  Set frequency channels (in Hz).\n");
-        printf("  --grid=<x0>,<path>     Gridding function to use\n");
+        printf("  --grid=<path>          Gridding function to use\n");
+        printf("  --grid-x0=<path>       Override gridder's x0 (useable FoV)\n");
         printf("  --vis=[vlaa/ska_low]   Use standard configuration sets\n");
         printf("  --writer-count=<val>   Number of parallel writers per process\n");
         printf("  --fork-writer          Fork separate processes for writers\n");
@@ -522,6 +531,9 @@ bool set_cmdarg_config(int argc, char **argv,
         if (!config_set_degrid(cfg, gridder_path[0] ? gridder_path : NULL)) {
             invalid = 1;
             fprintf(stderr, "ERROR: Could not access gridder at %s!", gridder_path);
+        }
+        if (gridder_x0 != 0) {
+            cfg->gridder_x0 = gridder_x0;
         }
     }
     if (have_vis_spec) {
