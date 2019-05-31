@@ -492,8 +492,8 @@ static double max(double a, double b) { return a < b ? b : a; }
 
 uint64_t streamer_degrid_worker(struct streamer *streamer,
                                 struct bl_data *bl_data,
-                                double complex *subgrid,
-                                double mid_u, double mid_v, int iu, int iv,
+                                int SG_stride, double complex *subgrid,
+                                double mid_u, double mid_v, int iu, int iv, bool conjugate,
                                 int it0, int it1, int if0, int if1,
                                 double min_u, double max_u, double min_v, double max_v,
                                 double complex *vis_data)
@@ -534,60 +534,64 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
     uint64_t flops = 0;
     uint64_t square_error_samples = 0;
     double square_error_sum = 0, worst_err = 0;
-    int time, freq;
+    int time;
     for (time = it0; time < it1; time++) {
-        for (freq = if0; freq < if1; freq++) {
 
-            // Bounds check. Make sure to only degrid visibilities
-            // exactly once - meaning u must be positive, and can only
-            // be 0 if the visibility is not conjugated.
-            double u = uvw_lambda(bl_data, time, freq, 0);
-            double v = uvw_lambda(bl_data, time, freq, 1);
-            double complex vis_out;
-            if (u >= min_u && u < max_u &&
-                v >= min_v && v < max_v) {
+        // Determine coordinates
+        double u = uvw_lambda(bl_data, time, 0, 0);
+        double v = uvw_lambda(bl_data, time, 0, 1);
+        double du = uvw_lambda(bl_data, time, 1, 0) - u;
+        double dv = uvw_lambda(bl_data, time, 1, 1) - v;
+        if (conjugate) {
+          u *= -1; du *= -1; v *= -1; dv *= -1;
+        }
 
-                // Degrid normal
-                vis_out = degrid_conv_uv(subgrid, subgrid_size, theta,
-                                         u-mid_u, v-mid_v, &streamer->kern, &flops);
+        // Degrid a line of visibilities
+        double complex *pvis = vis_data + (time-it0)*spec->freq_chunk;
+        degrid_conv_uv_line(subgrid, subgrid_size, SG_stride, theta,
+                            u-mid_u, v-mid_v, du, dv, if1 - if0,
+                            min_u-mid_u, max_u-mid_u, min_v-mid_v, max_v-mid_v, conjugate,
+                            &streamer->kern, pvis, &flops);
 
-            } else if (-u >= min_u && -u < max_u &&
-                       -v >= min_v && -v < max_v) {
-
-                // Degrid conjugate at negative coordinate
-                vis_out = conj(degrid_conv_uv(subgrid, subgrid_size, theta,
-                                              -u-mid_u, -v-mid_v, &streamer->kern, &flops)
-                               );
+        // Check against DFT (one per row, maximum)
+        if (source_checks > 0) {
+            if (check_counter >= if1 - if0) {
+                check_counter -= if1 - if0;
 
             } else {
-                vis_data[(time-it0)*spec->freq_chunk + freq-if0] = 0.;
-                continue;
-            }
 
-            // Write visibility
-            vis_data[(time-it0)*spec->freq_chunk + freq-if0] = vis_out;
+                double complex vis_out = pvis[check_counter];
+                double check_u = u + du * check_counter;
+                double check_v = v + dv * check_counter;
 
-            // Check against DFT
-            if (source_checks > 0 && !--check_counter) {
-                check_counter = source_checks;
-
-                // Generate visibility
+                // Check that we actually generated a visibility here,
+                // negate if necessary
                 complex double vis = 0;
-                for (i = 0; i < source_count; i++) {
-                    double ph = u * source_pos_l[i] + v * source_pos_m[i];
-                    vis += cos(ph) + 1.j * sin(ph);
-                }
-                vis /= (double)image_size * image_size;
+                if (check_u >= min_u && check_u < max_u &&
+                    check_v >= min_v && check_v < max_v) {
+                    if (conjugate) { check_u *= -1; check_v *= -1; }
 
+                    // Generate visibility
+                    for (i = 0; i < source_count; i++) {
+                        double ph = check_u * source_pos_l[i] + check_v * source_pos_m[i];
+                        vis += cos(ph) + 1.j * sin(ph);
+                    }
+                    vis /= (double)image_size * image_size;
+
+                }
+
+                // Check error
                 square_error_samples += 1;
                 double err = cabs(vis_out - vis);
-                if (err > 1e-3) {
-                    printf("WARNING: uv %g/%g (sg %d/%d): %g%+gj != %g%+gj",
+                if (err > 1e-8 && false) {
+                    fprintf(stderr,
+                           "WARNING: uv %g/%g (sg %d/%d): %g%+gj != %g%+gj\n",
                            u, v, iu, iv, creal(vis_out), cimag(vis_out), creal(vis), cimag(vis));
                 }
                 worst_err = fmax(err, worst_err);
                 square_error_sum += err * err;
 
+                check_counter = source_checks;
             }
         }
     }
@@ -618,7 +622,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
                            struct bl_data *bl_data,
                            int tchunk, int fchunk,
                            int slot,
-                           double complex *subgrid)
+                           int SG_stride, double complex *subgrid)
 {
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     struct recombine2d_config *const cfg = &streamer->work_cfg->recombine;
@@ -702,8 +706,8 @@ bool streamer_degrid_chunk(struct streamer *streamer,
 
     // Do degridding
     const size_t chunk_vis_size = sizeof(double complex) * spec->freq_chunk * spec->time_chunk;
-    uint64_t flops = streamer_degrid_worker(streamer, bl_data, subgrid,
-                                            sg_mid_u, sg_mid_v, work->iu, work->iv,
+    uint64_t flops = streamer_degrid_worker(streamer, bl_data, SG_stride, subgrid,
+                                            sg_mid_u, sg_mid_v, work->iu, work->iv, !positive_u,
                                             it0, it1, if0, if1,
                                             sg_min_u, sg_max_u, sg_min_v, sg_max_v,
                                             chunk ? chunk->vis : alloca(chunk_vis_size));
@@ -733,6 +737,24 @@ void streamer_task(struct streamer *streamer,
                    int subgrid_work,
                    double complex *subgrid)
 {
+
+
+    const int xM_size = streamer->work_cfg->recombine.xM_size;
+    const int SG_stride = xM_size + 16; // Assume 16x16 is biggest possible convolution
+    const int SG2_size = sizeof(double complex) *
+        SG_stride * xM_size;
+    double complex *subgrid2 = calloc(1, SG2_size);
+    int i;
+
+    // Establish proper stride for the subgrid so we don't get cache
+    // thrashing problems when gridding moves (TODO: construct like this right away?)
+    if (subgrid)
+        for (i = 0; i < xM_size; i++) {
+            memcpy(subgrid2 + SG_stride * i,
+                   subgrid + xM_size * i,
+                   sizeof(double complex) * xM_size);
+        }
+
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     struct subgrid_work_bl *bl2;
     int i_bl2;
@@ -753,7 +775,7 @@ void streamer_task(struct streamer *streamer,
             for (fchunk = 0; fchunk < nfchunk; fchunk++)
                 if (streamer_degrid_chunk(streamer, work,
                                           bl2, &bl_data, tchunk, fchunk,
-                                          slot, subgrid))
+                                          slot, SG_stride, subgrid2))
                     nchunks++;
 
         // Check that plan predicted the right number of chunks. This
@@ -774,6 +796,7 @@ void streamer_task(struct streamer *streamer,
 #pragma omp atomic
     streamer->subgrid_locks[slot]--;
 
+    free(subgrid2);
 }
 
 void streamer_work(struct streamer *streamer,
@@ -873,7 +896,7 @@ void streamer_work(struct streamer *streamer,
 
         // Degrid and compare
         bl.uvw_m = uvw_sg;
-        degrid_conv_bl(subgrid, cfg->xM_size, cfg->image_size, 0, 0,
+        degrid_conv_bl(subgrid, cfg->xM_size, cfg->xM_size, cfg->image_size, 0, 0,
                        -cfg->xM_size, cfg->xM_size, -cfg->xM_size, cfg->xM_size,
                        &bl, 0, nvis, 0, 1, &streamer->kern);
         double err_sum = 0; int y;

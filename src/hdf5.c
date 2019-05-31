@@ -572,7 +572,7 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
 
     // Read kernel
     hsize_t total_size = sepkern->oversampling * sepkern->size;
-    sepkern->data = (double *)calloc(sizeof(double), total_size);
+    sepkern->data = (double *)aligned_alloc(32, sizeof(double) * total_size);
     if (H5Dread(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, sepkern->data) < 0) {
         fprintf(stderr, "Failed to read separable kernel data from %s!\n", filename);
         H5Dclose(dset);

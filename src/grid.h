@@ -138,11 +138,17 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern);
 
 void frac_coord(int grid_size, int oversample,
                 double u, int *x, int *fx);
-double complex degrid_conv_uv(double complex *uvgrid, int grid_size, double theta,
-                              double u, double v,
-                              struct sep_kernel_data *kernel,
-                              uint64_t *flops);
-uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, double theta,
+void degrid_conv_uv_pf(double complex *uvgrid, int grid_size, int grid_stride, double theta,
+		       double u, double v,
+		       struct sep_kernel_data *kernel);
+void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride, double theta,
+			 double u0, double v0, double du, double dv, int count,
+			 double min_u, double max_u, double min_v, double max_v,
+			 bool conjugate,
+			 struct sep_kernel_data *kernel,
+			 double complex *pvis0, uint64_t *flops);
+
+uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, int grid_stride, double theta,
                         double d_u, double d_v,
                         double min_u, double max_u, double min_v, double max_v,
                         struct bl_data *bl, int time0, int time1, int freq0, int freq1,

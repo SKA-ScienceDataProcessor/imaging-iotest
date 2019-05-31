@@ -9,6 +9,7 @@
 #include <complex.h>
 #include <fftw3.h>
 #include <omp.h>
+#include <string.h>
 #include <fenv.h>
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -53,7 +54,8 @@ void frac_coord(int grid_size, int oversample,
 }
 
 // Fractional coordinate calculation for separable 1D kernel
-inline static void frac_coord_sep_uv(int grid_size, int kernel_size, int oversample,
+inline static void frac_coord_sep_uv(int grid_size, int grid_stride,
+                                     int kernel_size, int oversample,
                                      double theta,
                                      double u, double v,
                                      int *grid_offset,
@@ -66,20 +68,22 @@ inline static void frac_coord_sep_uv(int grid_size, int kernel_size, int oversam
     _frac_coord(grid_size, oversample, x, &ix, &ixf);
     _frac_coord(grid_size, oversample, y, &iy, &iyf);
     // Calculate grid and oversampled kernel offsets
-    *grid_offset = (iy-kernel_size/2)*grid_size + (ix-kernel_size/2);
+    *grid_offset = (iy-kernel_size/2)*grid_stride + (ix-kernel_size/2);
     *sub_offset_x = kernel_size * ixf;
     *sub_offset_y = kernel_size * iyf;
 }
 
-double complex degrid_conv_uv(double complex *uvgrid, int grid_size, double theta,
-                              double u, double v,
-                              struct sep_kernel_data *kernel,
-                              uint64_t *flops)
+inline static
+void degrid_conv_uv(double complex *uvgrid, int grid_size, int grid_stride, double theta,
+                    double complex mult,
+                    double u, double v,
+                    struct sep_kernel_data *kernel, int kernel_size,
+                    uint64_t *flops, double complex *pvis)
 {
 
     // Calculate grid and sub-grid coordinates
     int grid_offset, sub_offset_x, sub_offset_y;
-    frac_coord_sep_uv(grid_size, kernel->size, kernel->oversampling,
+    frac_coord_sep_uv(grid_size, grid_stride, kernel_size, kernel->oversampling,
                       theta, u, v,
                       &grid_offset, &sub_offset_x, &sub_offset_y);
 
@@ -88,44 +92,115 @@ double complex degrid_conv_uv(double complex *uvgrid, int grid_size, double thet
     // Get visibility
     double complex vis = 0;
     int y, x;
-    for (y = 0; y < kernel->size; y++) {
+    for (y = 0; y < kernel_size; y++) {
         double complex visy = 0;
-        for (x = 0; x < kernel->size; x++)
+        for (x = 0; x < kernel_size; x++) {
             visy += kernel->data[sub_offset_x + x] *
-                    uvgrid[grid_offset + y*grid_size + x];
+                    uvgrid[grid_offset + y*grid_stride + x];
+        }
         vis += kernel->data[sub_offset_y + y] * visy;
     }
-    *flops += 4 * (1 + kernel->size) * kernel->size;
-
-    return vis;
-
+    *flops += 4 * (1 + kernel_size) * kernel_size;
+    *pvis = creal(vis) * creal(mult) + I * cimag(vis) * cimag(mult);
 #else
 
+    double complex *pgrid = uvgrid + grid_offset;
+    double *kernel_x = kernel->data + sub_offset_x;
+    double *kernel_y = kernel->data + sub_offset_y;
+
     // Get visibility
-    assert(kernel->size % 2 == 0);
+    assert(kernel_size % 2 == 0);
     __m256d vis = _mm256_setzero_pd();
     int y, x;
-    for (y = 0; y < kernel->size; y += 1) {
-        __m256d sum = _mm256_setzero_pd();
-        for (x = 0; x < kernel->size; x += 2) {
-            double *pk = kernel->data + sub_offset_x + x;
+    for (y = 0; y < kernel_size; y += 1) {
+        __m256d grid = _mm256_loadu_pd((double *)(pgrid + y*grid_stride));
+        double *pk = kernel_x;
+        __m256d kern = _mm256_setr_pd(*pk, *pk, *(pk+1), *(pk+1));
+        __m256d sum = _mm256_mul_pd(kern, grid);
+        _mm_prefetch(uvgrid + grid_offset + (y+1)*grid_stride, _MM_HINT_T0);
+        for (x = 2, pk += 2; x < kernel_size; x += 2, pk += 2) {
             __m256d kern = _mm256_setr_pd(*pk, *pk, *(pk+1), *(pk+1));
-            __m256d grid = _mm256_loadu_pd((double *)(uvgrid + grid_offset + y*grid_size + x));
+            __m256d grid = _mm256_loadu_pd((double *)(pgrid + y*grid_stride + x));
             sum = _mm256_fmadd_pd(kern, grid, sum);
         }
-        double kern_y = kernel->data[sub_offset_y + y];
+        double kern_y = kernel_y[y];
         vis = _mm256_fmadd_pd(sum, _mm256_set1_pd(kern_y), vis);
     }
-    __attribute__ ((aligned (32))) double vis_s[4];
-    _mm256_store_pd(vis_s, vis);
-    double complex vis_res = vis_s[0] + vis_s[2] + 1.j * (vis_s[1] + vis_s[3]);
 
-    *flops += 4 * (1 + kernel->size) * kernel->size;
-    return vis_res;
+    __m128d vis_out = _mm256_extractf128_pd(vis, 0) + _mm256_extractf128_pd(vis, 1);
+    _mm_store_pd((double *)pvis, vis_out * _mm_load_pd((double *)&mult));
+
+    *flops += 4 * (1 + kernel_size) * kernel_size;
 #endif
 }
 
-uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, double theta,
+inline static int imax(int a, int b) { return a >= b ? a : b; }
+inline static int imin(int a, int b) { return a <= b ? a : b; }
+
+void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride, double theta,
+                         double u0, double v0, double du, double dv, int count,
+                         double min_u, double max_u, double min_v, double max_v,
+                         bool conjugate,
+                         struct sep_kernel_data *kernel,
+                         double complex *pvis0, uint64_t *flops)
+{
+
+    // Figure out bounds
+    int i0 = 0, i1 = count;
+    if (du > 0) {
+        if (u0+i0*du < min_u) i0 = imax(i0, ceil( (min_u - u0) / du ));
+        if (u0+i1*du > max_u) i1 = imin(i1, ceil( (max_u - u0) / du ));
+    } else if (du < 0) {
+        if (u0+i0*du > max_u) i0 = imax(i0, ceil( (max_u - u0) / du ));
+        if (u0+i1*du < min_u) i1 = imin(i1, ceil( (min_u - u0) / du ));
+    }
+    if (dv > 0) {
+        if (v0+i0*dv < min_v) i0 = imax(i0, ceil( (min_v - v0) / dv ));
+        if (v0+i1*dv > max_v) i1 = imin(i1, ceil( (max_v - v0) / dv ));
+    } else if (dv < 0) {
+        if (v0+i0*dv > max_v) i0 = imax(i0, ceil( (max_v - v0) / dv ));
+        if (v0+i1*dv < min_v) i1 = imin(i1, ceil( (min_v - v0) / dv ));
+    }
+    i0 = imax(0, imin(i0, i1));
+
+    // Fill zeroes
+    int i = 0; double complex *pvis = pvis0;
+    double u = u0, v = v0;
+    for (; i < i0; i++, u += du, v += dv, pvis++) {
+        //assert(!(u >= min_u && u < max_u &&
+        //         v >= min_v && v < max_v));
+        *pvis = 0.;
+    }
+
+    const int kernel_size = kernel->size;
+
+    // Anything to do?
+    if (i < i1) {
+
+        {
+
+            double complex mult = (conjugate ? 1 - I : 1 + I);
+            for (; i < i1; i++, u += du, v += dv, pvis+=1) {
+                assert(u >= min_u && u < max_u &&
+                       v >= min_v && v < max_v);
+                degrid_conv_uv(uvgrid, grid_size, grid_stride, theta,
+                               mult, u, v, kernel, kernel_size, flops, pvis);
+            }
+
+        }
+    }
+
+    // Fill remaining zeroes
+    for (; i < count; i++, u += du, v += dv, pvis++) {
+        //assert(!(u >= min_u && u < max_u &&
+        //       v >= min_v && v < max_v));
+        *pvis = 0.;
+    }
+
+}
+
+
+uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, int grid_stride, double theta,
                         double d_u, double d_v,
                         double min_u, double max_u, double min_v, double max_v,
                         struct bl_data *bl,
@@ -143,9 +218,10 @@ uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, double theta,
             double v = uvw_lambda(bl, time, freq, 1);
             if (v < min_v || v >= max_v) continue;
 
-            bl->vis[(time-time0)*(freq1 - freq0) + freq-freq0] =
-                degrid_conv_uv(uvgrid, grid_size, theta,
-                               u-d_u, v-d_v, kernel, &flops);
+            degrid_conv_uv(uvgrid, grid_size, grid_stride, theta,
+                           1+I,
+                           u-d_u, v-d_v, kernel, kernel->size, &flops,
+                           bl->vis + (time-time0)*(freq1 - freq0) + freq-freq0);
         }
     }
 

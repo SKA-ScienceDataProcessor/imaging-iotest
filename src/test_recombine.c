@@ -528,7 +528,7 @@ int T05_degrid()
         // Degrid and compare
         fft_shift(subgrid, cfg.xM_size);
         bl.uvw_m = uvw_sg;
-        degrid_conv_bl(subgrid, cfg.xM_size, cfg.image_size, 0, 0,
+        degrid_conv_bl(subgrid, cfg.xM_size, cfg.xM_size, cfg.image_size, 0, 0,
                        -cfg.xM_size, cfg.xM_size, -cfg.xM_size, cfg.xM_size,
                        &bl, 0, nvis, 0, 1, &kern);
         for (y = 0; y < nvis; y++) {
@@ -541,7 +541,7 @@ int T05_degrid()
         double du = (double)((i1 + nsubgrid/2) % nsubgrid - nsubgrid/2) / nsubgrid;
         if (fabs(dv) < 0.5 && fabs(du) < 0.5) {
             bl.uvw_m = uvw;
-            degrid_conv_bl(subgrid, cfg.xM_size, cfg.image_size, du, dv,
+            degrid_conv_bl(subgrid, cfg.xM_size, cfg.xM_size, cfg.image_size, du, dv,
                            -cfg.xM_size, cfg.xM_size, -cfg.xM_size, cfg.xM_size,
                            &bl, 0, nvis, 0, 1, &kern);
             for (y = 0; y < nvis; y++) {
