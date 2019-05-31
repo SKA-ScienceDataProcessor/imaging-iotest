@@ -226,7 +226,7 @@ enum Opts
         Opt_flag = 0,
 
         Opt_telescope, Opt_fov, Opt_dec, Opt_time, Opt_freq,
-        Opt_grid, Opt_grid_x0, Opt_vis_set,
+        Opt_grid, Opt_grid_x0, Opt_grid_downsample, Opt_vis_set,
         Opt_recombine, Opt_rec_aa, Opt_rec_set,
         Opt_rec_load_facet, Opt_rec_load_facet_hdf5, Opt_batch_rows,
         Opt_facet_workers, Opt_parallel_cols, Opt_dont_retain_bf,
@@ -251,6 +251,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"freq",       required_argument, 0, Opt_freq },
         {"grid",       required_argument, 0, Opt_grid },
         {"grid-x0",    required_argument, 0, Opt_grid_x0 },
+        {"grid-downsample", required_argument, 0, Opt_grid_downsample },
         {"vis-set",    required_argument, 0, Opt_vis_set},
         {"add-meta",   no_argument,       &cfg->vis_skip_metadata, false },
         {"dump-baseline-bins", no_argument, &cfg->config_dump_baseline_bins, true },
@@ -291,7 +292,7 @@ bool set_cmdarg_config(int argc, char **argv,
     double subgrid_threshold = 1e-8, subgrid_fct_threshold = 1e-8,
            subgrid_degrid_threshold = 1e-8;
     int facet_workers = (world_size + 1) / 2;
-    double gridder_x0 = 0;
+    double gridder_x0 = 0; int gridder_downsample = 0;
     char gridder_path[256]; char vis_path[256];
     char statsd_addr[256]; char statsd_port[256] = "8125";
     memset(&spec, 0, sizeof(spec));
@@ -344,9 +345,15 @@ bool set_cmdarg_config(int argc, char **argv,
             }
             break;
         case Opt_grid_x0:
-            nscan = sscanf(optarg, "%g", &gridder_x0);
+            nscan = sscanf(optarg, "%lg", &gridder_x0);
             if (nscan < 1) {
-                invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid' option!\n");
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid-x0' option!\n");
+            }
+            break;
+        case Opt_grid_downsample:
+            nscan = sscanf(optarg, "%d", &gridder_downsample);
+            if (nscan < 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid-downsample' option!\n");
             }
             break;
         case Opt_vis_set:
@@ -517,6 +524,10 @@ bool set_cmdarg_config(int argc, char **argv,
         if (!config_set_statsd(cfg, statsd_addr, statsd_port)) {
             return false;
         }
+	if (gridder_x0 != 0) {
+	  cfg->gridder_x0 = gridder_x0;
+	}
+	cfg->vis_gridder_downsample = gridder_downsample;
     }
 
     if (!config_set(cfg,

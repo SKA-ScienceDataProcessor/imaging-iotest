@@ -101,6 +101,7 @@ struct work_config {
     int vis_writer_count;
     int vis_fork_writer;
     int vis_check_existing;
+    int vis_gridder_downsample;
 
     // Statsd connection
     int statsd_socket;

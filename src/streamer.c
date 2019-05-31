@@ -1087,6 +1087,17 @@ bool streamer_init(struct streamer *streamer,
     if (wcfg->gridder_path) {
         if (load_sep_kern(wcfg->gridder_path, &streamer->kern))
             return false;
+
+        // Reduce oversampling if requested
+        if (wcfg->vis_gridder_downsample) {
+            int downsample = wcfg->vis_gridder_downsample;
+            streamer->kern.oversampling /= downsample;
+            for (int i = 1; i < streamer->kern.oversampling; i++) {
+                streamer->kern.data[i] = streamer->kern.data[i*downsample];
+            }
+
+        }
+
         streamer->have_kern = true;
     }
 
