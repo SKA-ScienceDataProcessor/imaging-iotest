@@ -527,8 +527,8 @@ bool set_cmdarg_config(int argc, char **argv,
 	if (gridder_x0 != 0) {
 	  cfg->gridder_x0 = gridder_x0;
 	}
-	cfg->vis_gridder_downsample = gridder_downsample;
     }
+    cfg->vis_gridder_downsample = gridder_downsample;
 
     if (!config_set(cfg,
                     recombine_pars[0], recombine_pars[1],

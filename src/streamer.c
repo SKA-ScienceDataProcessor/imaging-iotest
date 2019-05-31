@@ -1113,12 +1113,13 @@ bool streamer_init(struct streamer *streamer,
 
         // Reduce oversampling if requested
         if (wcfg->vis_gridder_downsample) {
-            int downsample = wcfg->vis_gridder_downsample;
+            const int downsample = wcfg->vis_gridder_downsample;
             streamer->kern.oversampling /= downsample;
             for (int i = 1; i < streamer->kern.oversampling; i++) {
-                streamer->kern.data[i] = streamer->kern.data[i*downsample];
+                memcpy(streamer->kern.data + i * streamer->kern.stride,
+                       streamer->kern.data + i * downsample * streamer->kern.stride,
+                       sizeof(double) * streamer->kern.size);
             }
-
         }
 
         streamer->have_kern = true;
