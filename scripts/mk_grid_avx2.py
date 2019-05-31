@@ -18,16 +18,21 @@ double_size = 8
 double_complex_size = 16
 register_size = 32
 cache_line_size = 64
-align = 16
+sse_align = 16
+avx_align = 32
 
 # Number of parallel sums. Should be at least the number of parallel
 # FMA units present on the CPU core
 parallel_sums = 2
 
 # No overflow for the moment
-assert (kernel_size * double_size % register_size == 0)
+assert (kernel_size * double_complex_size % register_size == 0)
 
-kernel_regs = kernel_size * double_size // register_size
+# Needs to be in sync with assumption in load_sep_kern!
+kernel_stride = avx_align * ((kernel_size * double_size + avx_align - 1) // avx_align) // double_size
+
+kernel_regs = (kernel_size * double_size + register_size - 1) // register_size
+kernel_regs_dup = (kernel_size * double_complex_size + register_size - 1) // register_size
 
 kernel_in_size = kernel_size * double_size
 kernel_in_cache_lines = (kernel_in_size + cache_line_size - 1) // cache_line_size
@@ -46,15 +51,16 @@ emit(f"""
 // THIS IS A GENERATED FILE!
 
 assert(kernel->size == {kernel_size});
-assert((uintptr_t)kernel->data % {align} == 0);
-assert((uintptr_t)pvis % {align} == 0);
+assert(kernel->stride == {kernel_stride});
+assert((uintptr_t)kernel->data % {avx_align} == 0);
+assert((uintptr_t)pvis % {sse_align} == 0);
 
 const int oversample = kernel->oversampling;
 __m128d conj_mask = conjugate ? _mm_xor_pd(_mm_set_pd(-1, 1), _mm_set_pd(1, 1)) : _mm_set_pd(0., 0.);
 
 // Calculate grid and sub-grid coordinates
 int grid_offset, sub_offset_x, sub_offset_y;
-frac_coord_sep_uv(grid_size, grid_stride, {kernel_size}, oversample,
+frac_coord_sep_uv(grid_size, grid_stride, {kernel_size}, {kernel_stride}, oversample,
                   theta, u, v,
                   &grid_offset, &sub_offset_x, &sub_offset_y);
 """)
@@ -65,7 +71,7 @@ unroll_y_loop = True
 if kernel_y_load:
 
     if not unroll_y_loop:
-        emit(f"__m256d kern_y_cache[{kernel_size * double_size // register_size}];")
+        emit(f"__m256d kern_y_cache[{kernel_regs}];")
 
     def load_kernel(ind, in_ptr, out_vars, declare=False):
         """Load kernels into variables (registers, possibly)"""
@@ -73,15 +79,15 @@ if kernel_y_load:
         dec = ("__m256d " if declare else "")
         for s in range(kernel_regs):
             off = s * register_size // double_size
-            emit(f"{ind}{dec}{out_vars[s]} = _mm256_load_pd({in_ptr}+{off});")
+            emit(f"{ind}{dec}{out_vars[s]} = _mm256_loadu_pd({in_ptr}+{off});")
 
     kern_y_vars = [ f"kern_y_cache[{s}]" if not unroll_y_loop else f"kern_y_{s}"
-                    for s in range(2 * kernel_regs) ]
+                    for s in range(kernel_regs_dup) ]
     load_kernel("", "kernel->data+sub_offset_y", kern_y_vars, unroll_y_loop)
 
 else:
 
-    emit(f"__attribute__((aligned({align}))) double kern_y_cache[{kernel_size}];")
+    emit(f"__attribute__((aligned({avx_align}))) double kern_y_cache[{kernel_size}];")
 
     def copy_kernel(ind, in_ptr, out_ptr):
         """ Copy kernel from and to memory """
@@ -105,11 +111,12 @@ def load_kernel_dup(ind, in_ptr, out_vars, declare=False):
         off = s * register_size // double_size
         permut1 = make_permute(0,0,1,1)
         permut2 = make_permute(2,2,3,3)
-        emit(f"{ind}__m256d k{s} = _mm256_load_pd({in_ptr}+{off});")
+        emit(f"{ind}__m256d k{s} = _mm256_loadu_pd({in_ptr}+{off});")
         emit(f"{ind}{dec}{out_vars[2*s]} = _mm256_permute4x64_pd(k{s},{permut1});")
-        emit(f"{ind}{dec}{out_vars[2*s+1]} = _mm256_permute4x64_pd(k{s},{permut2});")
+        if 2*s+1 < kernel_regs_dup:
+            emit(f"{ind}{dec}{out_vars[2*s+1]} = _mm256_permute4x64_pd(k{s},{permut2});")
 
-kern_x_vars = [ f"kern_x_{s}" for s in range(2 * kernel_regs) ]
+kern_x_vars = [ f"kern_x_{s}" for s in range(kernel_regs_dup) ]
 load_kernel_dup("", "kernel->data+sub_offset_x", kern_x_vars, declare=True)
 
 # Now generate loop over visibilities
@@ -118,7 +125,7 @@ complex double *next_grid = uvgrid + grid_offset;
 for (; i < i1; i++, u += du, v += dv, pvis++) {{
 
     int grid_offset, sub_offset_x, sub_offset_y;
-    frac_coord_sep_uv(grid_size, grid_stride, {kernel_size}, oversample,
+    frac_coord_sep_uv(grid_size, grid_stride, {kernel_size}, {kernel_stride}, oversample,
                       theta, u+du, v+dv,
                       &grid_offset, &sub_offset_x, &sub_offset_y);
 

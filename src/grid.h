@@ -102,6 +102,7 @@ struct sep_kernel_data
 {
     double *data; // Assumed to be real
     int size;
+    int stride;
     int oversampling;
 };
 

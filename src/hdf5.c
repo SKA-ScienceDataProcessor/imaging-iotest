@@ -566,19 +566,32 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
         return 1;
     }
 
-    // Read dimensions
+    // Allocate kernel memory, taking alignment into account
+    const int align = 32; // For AVX2
     sepkern->oversampling = dims[0];
     sepkern->size = dims[1];
+    sepkern->stride = align * ((sepkern->size * sizeof(double) + align - 1)  / align) / sizeof(double);
+    fprintf(stderr, "stride = %d\n", sepkern->stride);
+    hsize_t total_size = sepkern->oversampling * sepkern->stride;
+    sepkern->data = (double *)aligned_alloc(align, sizeof(double) * total_size);
+
+    // Create data space that reflects kernel's memory layout, select
+    // the bits we are actually going to write (i.e. tell it to ignore
+    // the superflous bytes that make up the stride)
+    hsize_t kdims[2] = { sepkern->oversampling, sepkern->stride };
+    hid_t kernel_memspace = H5Screate_simple(2, kdims, kdims);
+    hsize_t kstart[2] = { 0, 0 }; hsize_t kstride[2] = { 1, 1 };
+    H5Sselect_hyperslab(kernel_memspace, H5S_SELECT_SET, kstart, kstride, kstride, dims);
 
     // Read kernel
-    hsize_t total_size = sepkern->oversampling * sepkern->size;
-    sepkern->data = (double *)aligned_alloc(32, sizeof(double) * total_size);
-    if (H5Dread(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, sepkern->data) < 0) {
+    if (H5Dread(dset, H5T_NATIVE_DOUBLE, kernel_memspace, H5S_ALL, H5P_DEFAULT, sepkern->data) < 0) {
         fprintf(stderr, "Failed to read separable kernel data from %s!\n", filename);
+        H5Sclose(kernel_memspace);
         H5Dclose(dset);
         H5Fclose(sepkern_f);
         return 1;
     }
+    H5Sclose(kernel_memspace);
 
     // Close file
     H5Dclose(dset);

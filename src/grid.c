@@ -60,7 +60,7 @@ void frac_coord(int grid_size, int oversample,
 
 // Fractional coordinate calculation for separable 1D kernel
 inline static void frac_coord_sep_uv(int grid_size, int grid_stride,
-                                     int kernel_size, int oversample,
+                                     int kernel_size, int kernel_stride, int oversample,
                                      double theta,
                                      double u, double v,
                                      int *grid_offset,
@@ -74,26 +74,26 @@ inline static void frac_coord_sep_uv(int grid_size, int grid_stride,
     _frac_coord(grid_size, oversample, y, &iy, &iyf);
     // Calculate grid and oversampled kernel offsets
     *grid_offset = (iy-kernel_size/2)*grid_stride + (ix-kernel_size/2);
-    *sub_offset_x = kernel_size * ixf;
-    *sub_offset_y = kernel_size * iyf;
+    *sub_offset_x = kernel_stride * ixf;
+    *sub_offset_y = kernel_stride * iyf;
 }
 
 inline static
 void degrid_conv_uv(double complex *uvgrid, int grid_size, int grid_stride, double theta,
                     double complex mult,
                     double u, double v,
-                    struct sep_kernel_data *kernel, int kernel_size,
+                    struct sep_kernel_data *kernel,
                     uint64_t *flops, double complex *pvis)
 {
 
     // Calculate grid and sub-grid coordinates
     int grid_offset, sub_offset_x, sub_offset_y;
-    frac_coord_sep_uv(grid_size, grid_stride, kernel_size, kernel->oversampling,
+    const int kernel_size = kernel->size;
+    frac_coord_sep_uv(grid_size, grid_stride, kernel_size, kernel->stride, kernel->oversampling,
                       theta, u, v,
                       &grid_offset, &sub_offset_x, &sub_offset_y);
 
 #ifndef __AVX2__
-
     // Get visibility
     double complex vis = 0;
     int y, x;
@@ -177,17 +177,19 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
         *pvis = 0.;
     }
 
-    const int kernel_size = kernel->size;
-
     // Anything to do?
     if (i < i1) {
 
 #ifdef __AVX2__
-        if (kernel_size == 8) {
+        if (kernel->size == 8) {
             #include "grid_avx2_8.c"
-        } else if (kernel_size == 12) {
+        } else if (kernel->size == 10) {
+            #include "grid_avx2_10.c"
+        } else if (kernel->size == 12) {
             #include "grid_avx2_12.c"
-        } else if (kernel_size == 16) {
+        } else if (kernel->size == 14) {
+            #include "grid_avx2_14.c"
+        } else if (kernel->size == 16) {
             #include "grid_avx2_16.c"
 
         } else
@@ -199,7 +201,7 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
                 assert(u >= min_u && u < max_u &&
                        v >= min_v && v < max_v);
                 degrid_conv_uv(uvgrid, grid_size, grid_stride, theta,
-                               mult, u, v, kernel, kernel_size, flops, pvis);
+                               mult, u, v, kernel, flops, pvis);
             }
 
         }
@@ -235,7 +237,7 @@ uint64_t degrid_conv_bl(double complex *uvgrid, int grid_size, int grid_stride, 
 
             degrid_conv_uv(uvgrid, grid_size, grid_stride, theta,
                            1+I,
-                           u-d_u, v-d_v, kernel, kernel->size, &flops,
+                           u-d_u, v-d_v, kernel, &flops,
                            bl->vis + (time-time0)*(freq1 - freq0) + freq-freq0);
         }
     }
