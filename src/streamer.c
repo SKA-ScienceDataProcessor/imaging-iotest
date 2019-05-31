@@ -952,15 +952,15 @@ void streamer_work(struct streamer *streamer,
 
 static void _append_stat(char *stats, const char *stat_name, int worker, double val, double mult)
 {
-    sprintf(stats + strlen(stats), "user.recombine.%s:%ld|g|#streamer:%d\n",
-            stat_name, (uint64_t)(val * mult), worker);
+    sprintf(stats + strlen(stats), "user.recombine.%s:%g|g|#streamer:%d\n",
+            stat_name, (double)(val * mult), worker);
 }
 
 static void _append_writer_stat(char *stats, const char *stat_name, int worker, int writer,
                                 double val, double mult)
 {
-    sprintf(stats + strlen(stats), "user.recombine.%s:%ld|g|#streamer:%d,writer:%d\n",
-            stat_name, (uint64_t)(val * mult), worker, writer);
+    sprintf(stats + strlen(stats), "user.recombine.%s:%g|g|#streamer:%d,writer:%d\n",
+            stat_name, (double)(val * mult), worker, writer);
 }
 
 void *streamer_publish_stats(void *par)
@@ -993,7 +993,6 @@ void *streamer_publish_stats(void *par)
         stats[0] = 0;
 #define PARS(stat) stats, #stat, streamer->subgrid_worker, now.stat - last.stat
         _append_stat(PARS(wait_time), 100. / sample_rate);
-        _append_stat(PARS(wait_time), 100 / sample_rate);
         _append_stat(PARS(wait_in_time), 100. / streamer->num_workers / sample_rate);
         _append_stat(PARS(task_start_time), 100 / sample_rate);
         _append_stat(PARS(recombine_time), 100 / sample_rate);
