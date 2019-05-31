@@ -621,33 +621,35 @@ int main(int argc, char *argv[]) {
         // Determine number of producers and streamers (pretty arbitrary for now)
         int i;
 
-        if (world_rank < config.facet_workers) {
-            printf("%s pid %d role: Producer %d\n", proc_name, getpid(), world_rank);
+        if (world_rank >= config.subgrid_workers) {
+	    int producer_id = world_rank - config.subgrid_workers;
+            printf("%s pid %d role: Producer %d\n", proc_name, getpid(), producer_id);
 
             int *streamer_ranks = NULL;
-            if (config.facet_workers < world_size) {
+            if (config.subgrid_workers > 0) {
                 streamer_ranks = (int *)malloc(sizeof(int) * config.subgrid_workers);
                 for (i = 0; i < config.subgrid_workers; i++) {
-                    streamer_ranks[i] = config.facet_workers + i;
+                    streamer_ranks[i] = i;
                 }
             }
 
-            producer(&config, world_rank, streamer_ranks);
-
+            producer(&config, producer_id, streamer_ranks);
             free(streamer_ranks);
 
-        } else if (world_rank - config.facet_workers < config.subgrid_workers) {
-            printf("%s pid %d role: Streamer %d\n", proc_name, getpid(), world_rank - config.facet_workers);
+        } else if (world_rank < config.subgrid_workers) {
+	  int streamer_id = world_rank;
+	  printf("%s pid %d role: Streamer %d\n", proc_name, getpid(), streamer_id);
 
             int *producer_ranks = NULL;
-            if (config.subgrid_workers < world_size) {
+            if (config.facet_workers > 0) {
                 producer_ranks = (int *)malloc(sizeof(int) * config.facet_workers);
                 for (i = 0; i < config.facet_workers; i++) {
-                    producer_ranks[i] = i;
+                    producer_ranks[i] = config.subgrid_workers + i;
                 }
             }
 
-            streamer(&config, world_rank - config.facet_workers, producer_ranks);
+            streamer(&config, streamer_id, producer_ranks);
+            free(producer_ranks);
         }
 
     }
