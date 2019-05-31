@@ -1,12 +1,8 @@
 
-/.gitignore~
-
 *.o
 *.wisdom
 *~
 \#*\#
 perf.data
 
-src/iotest
-src/test_recombine
-src/test_config
+/scripts/slurm*

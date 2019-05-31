@@ -1,4 +1,6 @@
-/grid
+/grid_avx2_*.c
+/slurm*
+
 /test_recombine
-/recombine
+/iotest
 /test_config

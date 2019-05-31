@@ -182,6 +182,16 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
     // Anything to do?
     if (i < i1) {
 
+#ifdef __AVX2__
+        if (kernel_size == 8) {
+            #include "grid_avx2_8.c"
+        } else if (kernel_size == 12) {
+            #include "grid_avx2_12.c"
+        } else if (kernel_size == 16) {
+            #include "grid_avx2_16.c"
+
+        } else
+#endif
         {
 
             double complex mult = (conjugate ? 1 - I : 1 + I);
