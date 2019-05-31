@@ -11,7 +11,7 @@
 #include <omp.h>
 #include <string.h>
 #include <fenv.h>
-#ifdef __AVX2__
+#ifdef __SSE4_1__
 #include <immintrin.h>
 #endif
 
@@ -34,18 +34,23 @@ inline static int coord(int grid_size, double theta,
 }
 
 inline static void _frac_coord(int grid_size, int oversample,
-                              double u, int *x, int *fx) {
+                               double u, int *x, int *fx) {
 
     // Round to nearest oversampling value. We assume the kernel to be
     // in "natural" order, so what we are looking for is the best
     //    "x - fx / oversample"
     // approximation for "grid_size/2 + u".
-    fesetround(3);
-    int ox = lrint((grid_size / 2 - u) * oversample);
+    double o = (grid_size / 2 - u) * oversample;
+#ifdef __SSE4_1__
+    int ox = _mm_round_pd(_mm_set_pd(0, o),_MM_FROUND_TO_NEAREST_INT)[0];
+#else
+    fesetround(3); int ox = lrint(o);
+#endif
     *x = grid_size-(ox / oversample);
     *fx = ox % oversample;
 
 }
+
 void frac_coord(int grid_size, int oversample,
                 double u, int *x, int *fx) {
 
