@@ -652,16 +652,23 @@ int main(int argc, char *argv[]) {
 
     }
 
-#ifndef NO_MPI
-        MPI_Barrier(MPI_COMM_WORLD);
-        MPI_Finalize();
-#endif
-
-    config_free(&config);
-
     // Master: Write wisdom
     if (world_rank == 0) {
         fftw_export_wisdom_to_filename("recombine.wisdom");
     }
+
+    config_free(&config);
+
+#ifndef NO_MPI
+    MPI_Request barrier;
+    MPI_Ibarrier(MPI_COMM_WORLD, &barrier);
+    for (;;) {
+        int flag = 0;
+	MPI_Test(&barrier, &flag, MPI_STATUS_IGNORE);
+	if (flag) break;
+	usleep(100);
+    }
+    MPI_Finalize();
+#endif
     return 0;
 }

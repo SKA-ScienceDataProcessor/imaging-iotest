@@ -821,6 +821,7 @@ void streamer_work(struct streamer *streamer,
         if (slot < streamer->queue_length)
             break;
         #pragma omp taskyield
+        usleep(100);
     }
 
     double recombine_start = get_time_ns();
