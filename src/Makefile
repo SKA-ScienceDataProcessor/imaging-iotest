@@ -6,6 +6,8 @@ CFLAGS += -Wall -fopenmp -ffast-math -I$(HDF5_INC) -ggdb -march=native -O2
 LDFLAGS += -fopenmp -ggdb -O2
 LDLIBS = -L$(HDF5_LIB) -lm -lhdf5 -lfftw3
 CC = mpicc
+MPIRUN = mpirun
+
 
 IOTEST_OBJS = iotest.o recombine.o hdf5.o config.o producer.o streamer.o grid.o
 TEST_RECOMBINE_OBJS = recombine.o test_recombine.o grid.o hdf5.o
@@ -14,6 +16,13 @@ TEST_CONFIG_OBJS = test_config.o config.o recombine.o  hdf5.o
 iotest : $(IOTEST_OBJS)
 test_recombine : $(TEST_RECOMBINE_OBJS)
 test_config : $(TEST_CONFIG_OBJS)
+
+
+.PHONY: test_T05 test_small
+test_T05: iotest
+	$(MPIRUN) -n 2 ./iotest --rec-set=T05 | grep RMSE
+test_small: iotest
+	OMP_NUM_THREADS=16 $(MPIRUN) -n 2 ./iotest --rec-set=small --vis-set=vlaa --subgrid-queue=128 --source-count=10 --freq=280e6:300e6/128/128 --grid=../data/grid/kernel_16_0.35.in | grep RMSE
 
 .PHONY: clean
 clean :
