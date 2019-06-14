@@ -518,8 +518,6 @@ bool set_cmdarg_config(int argc, char **argv,
 
     // Set configuration
     int subgrid_workers = world_size - facet_workers;
-    if (subgrid_workers < 1) subgrid_workers = 1;
-
     if (statsd_addr[0]) {
         if (!config_set_statsd(cfg, statsd_addr, statsd_port)) {
             return false;

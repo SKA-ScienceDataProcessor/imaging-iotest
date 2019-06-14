@@ -527,39 +527,43 @@ static bool generate_full_redistribute_assignment(struct work_config *cfg)
     // the number of facet workers.
     assert(!cfg->spec.time_count);
 
-    int nsubgrid = cfg->recombine.image_size / cfg->recombine.xA_size;
-    int subgrid_work = nsubgrid * nsubgrid;
-    cfg->subgrid_max_work = (subgrid_work + cfg->subgrid_workers - 1) / cfg->subgrid_workers;
-    cfg->subgrid_work = (struct subgrid_work *)
-        calloc(sizeof(struct subgrid_work), cfg->subgrid_max_work * cfg->subgrid_workers);
-    int i;
-    for (i = 0; i < subgrid_work; i++) {
-        struct subgrid_work *work = cfg->subgrid_work + i;
-        work->iu = i / nsubgrid;
-        work->iv = i % nsubgrid;
-        work->subgrid_off_u = work->iu * cfg->recombine.xA_size;
-        work->subgrid_off_v = work->iv * cfg->recombine.xA_size;
-        work->nbl = 1;
-        // Dummy 0-0 baseline
-        work->bls = (struct subgrid_work_bl *)calloc(sizeof(struct  subgrid_work_bl), 1);
+    if (cfg->subgrid_workers > 0) {
+        int nsubgrid = cfg->recombine.image_size / cfg->recombine.xA_size;
+        int subgrid_work = nsubgrid * nsubgrid;
+        cfg->subgrid_max_work = (subgrid_work + cfg->subgrid_workers - 1) / cfg->subgrid_workers;
+        cfg->subgrid_work = (struct subgrid_work *)
+            calloc(sizeof(struct subgrid_work), cfg->subgrid_max_work * cfg->subgrid_workers);
+        int i;
+        for (i = 0; i < subgrid_work; i++) {
+            struct subgrid_work *work = cfg->subgrid_work + i;
+            work->iu = i / nsubgrid;
+            work->iv = i % nsubgrid;
+            work->subgrid_off_u = work->iu * cfg->recombine.xA_size;
+            work->subgrid_off_v = work->iv * cfg->recombine.xA_size;
+            work->nbl = 1;
+            // Dummy 0-0 baseline
+            work->bls = (struct subgrid_work_bl *)calloc(sizeof(struct  subgrid_work_bl), 1);
+        }
+        cfg->iu_min = cfg->iv_min = 0;
+        cfg->iu_max = cfg->iv_max = nsubgrid-1;
     }
-    cfg->iu_min = cfg->iv_min = 0;
-    cfg->iu_max = cfg->iv_max = nsubgrid-1;
 
-    if (cfg->facet_workers == 0) return true;
-    int nfacet = cfg->recombine.image_size / cfg->recombine.yB_size;
-    cfg->facet_max_work = (nfacet * nfacet + cfg->facet_workers - 1) / cfg->facet_workers;
-    cfg->facet_count = nfacet * nfacet;
-    cfg->facet_work = (struct facet_work *)
-        calloc(sizeof(struct facet_work), cfg->facet_max_work * cfg->facet_workers);
-    for (i = 0; i < nfacet * nfacet; i++) {
-        int iworker = i % cfg->facet_workers, iwork = i / cfg->facet_workers;
-        struct facet_work *work = cfg->facet_work + cfg->facet_max_work * iworker + iwork;
-        work->il = i / nfacet;
-        work->im = i % nfacet;
-        work->facet_off_l = work->il * cfg->recombine.yB_size;
-        work->facet_off_m = work->im * cfg->recombine.yB_size;
-        work->set = true;
+    if (cfg->facet_workers > 0) {
+        int nfacet = cfg->recombine.image_size / cfg->recombine.yB_size;
+        cfg->facet_max_work = (nfacet * nfacet + cfg->facet_workers - 1) / cfg->facet_workers;
+        cfg->facet_count = nfacet * nfacet;
+        cfg->facet_work = (struct facet_work *)
+            calloc(sizeof(struct facet_work), cfg->facet_max_work * cfg->facet_workers);
+        int i;
+        for (i = 0; i < nfacet * nfacet; i++) {
+            int iworker = i % cfg->facet_workers, iwork = i / cfg->facet_workers;
+            struct facet_work *work = cfg->facet_work + cfg->facet_max_work * iworker + iwork;
+            work->il = i / nfacet;
+            work->im = i % nfacet;
+            work->facet_off_l = work->il * cfg->recombine.yB_size;
+            work->facet_off_m = work->im * cfg->recombine.yB_size;
+            work->set = true;
+        }
     }
 
     return true;

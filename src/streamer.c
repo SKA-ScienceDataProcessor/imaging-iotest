@@ -1115,7 +1115,8 @@ bool streamer_init(struct streamer *streamer,
         if (wcfg->vis_gridder_downsample) {
             const int downsample = wcfg->vis_gridder_downsample;
             streamer->kern.oversampling /= downsample;
-            for (int i = 1; i < streamer->kern.oversampling; i++) {
+            int i;
+            for (i = 1; i < streamer->kern.oversampling; i++) {
                 memcpy(streamer->kern.data + i * streamer->kern.stride,
                        streamer->kern.data + i * downsample * streamer->kern.stride,
                        sizeof(double) * streamer->kern.size);
