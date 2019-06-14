@@ -572,7 +572,7 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
     sepkern->size = dims[1];
     sepkern->stride = align * ((sepkern->size * sizeof(double) + align - 1)  / align) / sizeof(double);
     hsize_t total_size = sepkern->oversampling * sepkern->stride;
-    sepkern->data = (double *)aligned_alloc(align, sizeof(double) * total_size);
+    posix_memalign(&sepkern->data, align, sizeof(double) * total_size);
 
     // Create data space that reflects kernel's memory layout, select
     // the bits we are actually going to write (i.e. tell it to ignore
