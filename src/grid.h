@@ -16,10 +16,10 @@ struct bl_data
     int antenna1, antenna2;
     int time_count;
     int freq_count;
-    double *time;
-    double *freq;
-    double *uvw_m; // in m
-    double complex *vis;
+    double *time; // [time_count], in s (hour angle)
+    double *freq; // [freq_count], in Hz
+    double *uvw_m; // [time_count], in m
+    double complex *vis; // [time_count, freq_count]
 
     // temporary from here
 
@@ -36,7 +36,7 @@ struct vis_data
 {
     int antenna_count;
     int bl_count;
-    struct bl_data *bl;
+    struct bl_data *bl; // [bl_count]
 };
 
 // Antenna/station configuration
@@ -44,7 +44,7 @@ struct ant_config
 {
     int ant_count;
     char *name;
-    double *xyz; // x geographical east, z celestial north
+    double *xyz; // [ant_count, xyz] - x geographical east, z celestial north
 };
 
 static const double c = 299792458.0;
