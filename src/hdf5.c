@@ -571,7 +571,6 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
     sepkern->oversampling = dims[0];
     sepkern->size = dims[1];
     sepkern->stride = align * ((sepkern->size * sizeof(double) + align - 1)  / align) / sizeof(double);
-    fprintf(stderr, "stride = %d\n", sepkern->stride);
     hsize_t total_size = sepkern->oversampling * sepkern->stride;
     sepkern->data = (double *)aligned_alloc(align, sizeof(double) * total_size);
 
