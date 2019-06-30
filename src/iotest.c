@@ -230,7 +230,8 @@ enum Opts
         Opt_recombine, Opt_rec_aa, Opt_rec_set,
         Opt_rec_load_facet, Opt_rec_load_facet_hdf5, Opt_batch_rows,
         Opt_facet_workers, Opt_parallel_cols, Opt_dont_retain_bf,
-        Opt_source_count, Opt_send_queue,
+        Opt_source_count, Opt_source_seed, Opt_vis_checks, Opt_grid_checks,
+        Opt_max_error, Opt_send_queue,
         Opt_bls_per_task, Opt_subgrid_queue, Opt_task_queue, Opt_visibility_queue,
         Opt_writer_count,
         Opt_statsd, Opt_statsd_port,
@@ -264,18 +265,23 @@ bool set_cmdarg_config(int argc, char **argv,
         {"load-facet-hdf5", required_argument, 0, Opt_rec_load_facet_hdf5 },
         {"batch-rows", required_argument, 0, Opt_batch_rows },
 
-        {"facet-workers", required_argument, 0, Opt_facet_workers },
-        {"parallel-columns", no_argument, &cfg->produce_parallel_cols, true },
-        {"dont-retain-bf", no_argument,   &cfg->produce_retain_bf, false },
-        {"source-count", required_argument, 0, Opt_source_count },
-        {"bls-per-task", required_argument, 0, Opt_bls_per_task },
-        {"send-queue", required_argument, 0, Opt_send_queue },
-        {"subgrid-queue", required_argument, 0, Opt_subgrid_queue },
-        {"task-queue", required_argument, 0, Opt_task_queue },
-        {"visibility-queue", required_argument, 0, Opt_visibility_queue },
-        {"writer-count",required_argument,0, Opt_writer_count },
-        {"fork-writer",no_argument,       &cfg->vis_fork_writer, true },
-        {"check-existing",no_argument,    &cfg->vis_check_existing, true },
+        {"source-count",    required_argument, 0, Opt_source_count },
+        {"source-seed",     required_argument, 0, Opt_source_seed },
+        {"vis-check-freq",  required_argument, 0, Opt_vis_checks },
+        {"grid-check-freq", required_argument, 0, Opt_grid_checks },
+        {"max-error",       required_argument, 0, Opt_max_error },
+
+        {"facet-workers",   required_argument, 0, Opt_facet_workers },
+        {"parallel-columns",no_argument,       &cfg->produce_parallel_cols, true },
+        {"dont-retain-bf",  no_argument,       &cfg->produce_retain_bf, false },
+        {"bls-per-task",    required_argument, 0, Opt_bls_per_task },
+        {"send-queue",      required_argument, 0, Opt_send_queue },
+        {"subgrid-queue",   required_argument, 0, Opt_subgrid_queue },
+        {"task-queue",      required_argument, 0, Opt_task_queue },
+        {"visibility-queue",required_argument, 0, Opt_visibility_queue },
+        {"writer-count",    required_argument, 0, Opt_writer_count },
+        {"fork-writer",     no_argument,       &cfg->vis_fork_writer, true },
+        {"check-existing",  no_argument,       &cfg->vis_check_existing, true },
 
         {"statsd",     optional_argument, 0, Opt_statsd },
         {"statsd-port",required_argument, 0, Opt_statsd_port },
@@ -295,6 +301,7 @@ bool set_cmdarg_config(int argc, char **argv,
     double gridder_x0 = 0; int gridder_downsample = 0;
     char gridder_path[256]; char vis_path[256];
     char statsd_addr[256]; char statsd_port[256] = "8125";
+    int source_count = 0; int source_seed = 0;
     memset(&spec, 0, sizeof(spec));
     spec.dec = 90 * atan(1) * 4 / 180;
     memset(&recombine_pars, 0, sizeof(recombine_pars));
@@ -404,9 +411,34 @@ bool set_cmdarg_config(int argc, char **argv,
             }
             break;
         case Opt_source_count:
-            nscan = sscanf(optarg, "%d", &cfg->produce_source_count);
+            nscan = sscanf(optarg, "%d", &source_count);
             if (nscan != 1) {
                 invalid=true; fprintf(stderr, "ERROR: Could not parse 'source-count' option!\n");
+            }
+            break;
+        case Opt_source_seed:
+            nscan = sscanf(optarg, "%d", &source_seed);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'source-seed' option!\n");
+            }
+            break;
+        case Opt_vis_checks:
+            nscan = sscanf(optarg, "%d", &cfg->vis_checks);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'vis-check-freq' option!\n");
+            }
+            break;
+        case Opt_grid_checks:
+            nscan = sscanf(optarg, "%d", &cfg->grid_checks);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'grid-check-freq' option!\n");
+            }
+            break;
+        case Opt_max_error:
+            nscan = sscanf(optarg, "%lg", &cfg->vis_max_error);
+            printf("max_error=%g\n", cfg->vis_max_error);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'max-error' option!\n");
             }
             break;
         case Opt_bls_per_task:
@@ -470,7 +502,7 @@ bool set_cmdarg_config(int argc, char **argv,
         if (!spec.time_count) { invalid=1; fprintf(stderr, "ERROR: Please specify dump times!\n"); }
         if (!spec.freq_count) { invalid=1; fprintf(stderr, "ERROR: Please specify frequency channels!\n"); }
     } else {
-        if (cfg->produce_source_count) { invalid=1; fprintf(stderr, "ERROR: Please specify visibilities (FoV) when generating sources!\n"); }
+        if (source_count) { invalid=1; fprintf(stderr, "ERROR: Please specify visibilities (FoV) when generating sources!\n"); }
     }
 
     if (!recombine_pars[0]) {
@@ -492,8 +524,15 @@ bool set_cmdarg_config(int argc, char **argv,
         printf("  --grid=<path>          Gridding function to use\n");
         printf("  --grid-x0=<path>       Override gridder's x0 (useable FoV)\n");
         printf("  --vis=[vlaa/ska_low]   Use standard configuration sets\n");
-        printf("  --writer-count=<val>   Number of parallel writers per process\n");
+        printf("  --writer-count=<N>     Number of parallel writers per process\n");
         printf("  --fork-writer          Fork separate processes for writers\n");
+        printf("\n");
+        printf("Sky Parameters:\n");
+        printf("  --source-count=<N>     Add random on-grid sources to image\n");
+        printf("  --source-seed=<N>      Seed for source positions\n");
+        printf("  --vis-check-freq=<N>   Step of visibility checks vs DFT (default 16384)\n");
+        printf("  --grid-check-freq=<N>  Step of grid checks vs DFT (default 4096)\n");
+        printf("  --max-error=<val>      Maximum allowed error from checks\n");
         printf("\n");
         printf("Recombination Parameters:\n");
         printf("  --recombine=<N>,<Ny>,<yBs>,<yNs>,<yPs>,<xAs>,<xMs>,<xMxMyPs>\n");
@@ -522,9 +561,9 @@ bool set_cmdarg_config(int argc, char **argv,
         if (!config_set_statsd(cfg, statsd_addr, statsd_port)) {
             return false;
         }
-	if (gridder_x0 != 0) {
-	  cfg->gridder_x0 = gridder_x0;
-	}
+        if (gridder_x0 != 0) {
+            cfg->gridder_x0 = gridder_x0;
+        }
     }
     cfg->vis_gridder_downsample = gridder_downsample;
 
@@ -548,6 +587,9 @@ bool set_cmdarg_config(int argc, char **argv,
     if (have_vis_spec) {
         config_set_visibilities(cfg, &spec, spec.fov / 2 / cfg->gridder_x0,
                                 vis_path[0] ? vis_path : NULL);
+    }
+    if (source_count > 0) {
+        config_set_sources(cfg, source_count, source_seed);
     }
 
     // Make work assignment

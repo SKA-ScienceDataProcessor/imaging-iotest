@@ -84,13 +84,18 @@ struct work_config {
     // Recombination configuration
     struct recombine2d_config recombine;
 
+    // Source configuration (if we are working from a "sky model")
+    int source_count;
+    double *source_xy; // Source image positions [produce_souce_count x xy]
+    double *source_lmn; // Source sky positions [produce_souce_count x lmn]
+    double *source_corr; // Grid correction at source positions
+    double source_energy; // Mean energy sources add to every grid cell
+
     // Parameters
     int config_dump_baseline_bins;
     int config_dump_subgrid_work;
     int produce_parallel_cols;
     int produce_retain_bf;
-    int produce_source_count;
-    int produce_source_checks;
     int produce_batch_rows;
     int produce_queue_length;
     int vis_skip_metadata;
@@ -102,6 +107,8 @@ struct work_config {
     int vis_fork_writer;
     int vis_check_existing;
     int vis_gridder_downsample;
+    int vis_checks, grid_checks;
+    double vis_max_error;
 
     // Statsd connection
     int statsd_socket;
@@ -146,6 +153,8 @@ void config_check_subgrids(struct work_config *cfg,
                            const char *check_fmt, const char *check_fct_fmt,
                            const char *check_degrid_fmt, const char *hdf5);
 
+void config_set_sources(struct work_config *cfg, int count, unsigned int seed);
+
 void vis_spec_to_bl_data(struct bl_data *bl, struct vis_spec *spec,
                          int a1, int a2);
 bool create_bl_groups(hid_t vis_group, struct work_config *work_cfg, int worker);
@@ -155,6 +164,6 @@ int make_subgrid_tag(struct work_config *wcfg,
                      int facet_worker_ix, int facet_work_ix);
 
 int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks);
-void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks);
+int streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks);
 
 #endif // CONFIG_H

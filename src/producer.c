@@ -224,8 +224,7 @@ void producer_send_subgrid(struct work_config *wcfg, struct producer_stream *pro
 bool producer_fill_facet(struct recombine2d_config *cfg,
                          struct facet_work *work,
                          double complex *F,
-                         int source_count,
-                         double gridder_x0, double *grid_correction,
+                         int source_count, double *source_xy, double *source_corr,
                          int x0_start, int x0_end) {
 
     int offset = sizeof(double complex) *x0_start * cfg->yB_size;
@@ -267,12 +266,9 @@ bool producer_fill_facet(struct recombine2d_config *cfg,
     } else if (source_count > 0) {
 
         // Place sources in gridder's usable region
-        unsigned int seed = 0;
-        int image_x0_size = (int)floor(2 * gridder_x0 * cfg->image_size);
         int i;
         for (i = 0; i < source_count; i++) {
-            int il = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
-            int im = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
+            int il = source_xy[i*2+0], im = source_xy[i*2+1];
 
             // Skip sources outside the current facet (region)
             if (il - work->facet_off_l < -cfg->yB_size/2 ||
@@ -291,12 +287,9 @@ bool producer_fill_facet(struct recombine2d_config *cfg,
                 continue;
             }
 
-            double c =
-                grid_correction[(il + cfg->image_size) % cfg->image_size] *
-                grid_correction[(im + cfg->image_size) % cfg->image_size];
-            assert(c != 0);
-
-            F[(x0-x0_start)*cfg->F_stride0 + x1*cfg->F_stride1] += 1 / c;
+            // Add source, with gridding correction applied
+            F[(x0-x0_start)*cfg->F_stride0 + x1*cfg->F_stride1]
+                += 1 / source_corr[i];
         }
 
     } else {
@@ -478,8 +471,7 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
                 F + ifacet * wcfg->recombine.F_size / sizeof(*F)
                   + x0*cfg->F_stride0;
             producer_fill_facet(cfg, fwork + ifacet, pF,
-                                wcfg->produce_source_count,
-                                wcfg->gridder_x0, wcfg->grid_correction,
+                                wcfg->source_count, wcfg->source_xy, wcfg->source_corr,
                                 x0, x0_end);
         }
     }

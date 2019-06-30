@@ -579,8 +579,6 @@ void config_init(struct work_config *cfg)
     cfg->config_dump_subgrid_work = false;
     cfg->produce_parallel_cols = false;
     cfg->produce_retain_bf = true;
-    cfg->produce_source_count = 0;
-    cfg->produce_source_checks = 16384;
     cfg->produce_batch_rows = 16;
     cfg->produce_queue_length = 4;
     cfg->vis_skip_metadata = true;
@@ -592,6 +590,9 @@ void config_init(struct work_config *cfg)
     cfg->vis_fork_writer = false;
     cfg->vis_check_existing = false;
     cfg->vis_gridder_downsample = 0;
+    cfg->vis_checks = 16384;
+    cfg->grid_checks = 4096;
+    cfg->vis_max_error = 1;
 
     cfg->statsd_socket = -1;
     cfg->statsd_rate = 1;
@@ -861,6 +862,52 @@ bool config_assign_work(struct work_config *cfg,
     }
 
     return true;
+}
+
+void config_set_sources(struct work_config *cfg, int count, unsigned int seed)
+{
+
+    // Determine portion of the image that can be assumed to be
+    // precise with respect to our gridding function
+    const int image_size = cfg->recombine.image_size;
+    const double image_x0 = cfg->spec.fov / cfg->theta / 2;
+    const int image_x0_size = (int)floor(2 * image_x0 * image_size);
+
+    // Allocate
+    cfg->source_count = count;
+    free(cfg->source_xy); free(cfg->source_lmn); free(cfg->source_corr);
+    cfg->source_xy = (double *)malloc(sizeof(double) * count * 2);
+    cfg->source_lmn = (double *)malloc(sizeof(double) * count * 3);
+    cfg->source_corr = (double *)malloc(sizeof(double) * count);
+    cfg->source_energy = (double)count / image_size / image_size;
+
+    // Start making sources using fixed random seed (so all ranks
+    // create the same ones)
+    int i;
+    for (i = 0; i < count; i++) {
+        // Choose on-grid positions
+        int il = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
+        int im = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
+        cfg->source_xy[2*i+0] = il; cfg->source_xy[2*i+1] = im;
+        // Determine coordinates in l/m/n system
+        double l = il * cfg->theta / image_size;
+        double m = im * cfg->theta / image_size;
+        double n = sqrt(1 - l*l - m*m);
+        cfg->source_lmn[3*i+0] = l;
+        cfg->source_lmn[3*i+1] = m;
+        cfg->source_lmn[3*i+2] = n;
+        // Get grid correction to apply
+        if (cfg->grid_correction) {
+            cfg->source_corr[i] =
+                cfg->grid_correction[(il + image_size) % image_size] *
+                cfg->grid_correction[(im + image_size) % image_size];
+            // Could cause divisions by zero down the line
+            assert(cfg->source_corr[i] != 0);
+        } else {
+            cfg->source_corr[i] = 1;
+        }
+    }
+
 }
 
 // Make baseline specification. Right now this is the same for every

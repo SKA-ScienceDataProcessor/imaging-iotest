@@ -96,8 +96,8 @@ struct streamer
     double wait_in_time;
     double recombine_time, task_start_time, degrid_time;
     uint64_t received_data, received_subgrids, baselines_covered;
-    uint64_t square_error_samples;
-    double square_error_sum, worst_error;
+    uint64_t vis_error_samples, grid_error_samples;
+    double vis_error_sum, vis_worst_error, grid_error_sum, grid_worst_error;
     uint64_t degrid_flops;
     uint64_t produced_chunks;
     uint64_t task_yields;
@@ -506,25 +506,12 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
     // check them
     int i;
     const int image_size = streamer->work_cfg->recombine.image_size;
-    const int source_count = streamer->work_cfg->produce_source_count;
-    int source_checks = streamer->work_cfg->produce_source_checks;
-    const double facet_x0 = streamer->work_cfg->spec.fov / streamer->work_cfg->theta / 2;
-    const int image_x0_size = (int)floor(2 * facet_x0 * image_size);
-    double *source_pos_l = NULL, *source_pos_m = NULL;
+    const int source_count = streamer->work_cfg->source_count;
+
+    // Initialise counter to random value so we check random visibilities
+    int source_checks = streamer->work_cfg->vis_checks;
     int check_counter = 0;
     if (source_checks > 0 && source_count > 0) {
-        source_pos_l = (double *)malloc(sizeof(double) * source_count);
-        source_pos_m = (double *)malloc(sizeof(double) * source_count);
-        unsigned int seed = 0;
-        for (i = 0; i < source_count; i++) {
-            int il = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
-            int im = (int)(rand_r(&seed) % image_x0_size) - image_x0_size / 2;
-            // Create source positions scaled for quick usage below
-            source_pos_l[i] = 2 * M_PI * il * theta / image_size;
-            source_pos_m[i] = 2 * M_PI * im * theta / image_size;
-        }
-        // Initialise counter to random value so we check random
-        // visibilities
         check_counter = rand() % source_checks;
     } else {
         source_checks = 0;
@@ -543,7 +530,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         double du = uvw_lambda(bl_data, time, 1, 0) - u;
         double dv = uvw_lambda(bl_data, time, 1, 1) - v;
         if (conjugate) {
-          u *= -1; du *= -1; v *= -1; dv *= -1;
+            u *= -1; du *= -1; v *= -1; dv *= -1;
         }
 
         // Degrid a line of visibilities
@@ -573,8 +560,10 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
 
                     // Generate visibility
                     for (i = 0; i < source_count; i++) {
-                        double ph = check_u * source_pos_l[i] + check_v * source_pos_m[i];
-                        vis += cos(ph) + 1.j * sin(ph);
+                        double ph =
+                            check_u * streamer->work_cfg->source_lmn[i*3+0] +
+                            check_v * streamer->work_cfg->source_lmn[i*3+1];
+                        vis += cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph);
                     }
                     vis /= (double)image_size * image_size;
 
@@ -596,17 +585,15 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         }
     }
 
-    free(source_pos_l); free(source_pos_m);
-
     // Add to statistics
     #pragma omp atomic
-        streamer->square_error_samples += square_error_samples;
+        streamer->vis_error_samples += square_error_samples;
     #pragma omp atomic
-        streamer->square_error_sum += square_error_sum;
-    if (worst_err > streamer->worst_error) {
+        streamer->vis_error_sum += square_error_sum;
+    if (worst_err > streamer->vis_worst_error) {
         // Likely happens rarely enough that a critical section won't be a problem
         #pragma omp critical
-           streamer->worst_error = max(streamer->worst_error, worst_err);
+           streamer->vis_worst_error = max(streamer->vis_worst_error, worst_err);
     }
     #pragma omp atomic
         streamer->degrid_flops += flops;
@@ -911,6 +898,58 @@ void streamer_work(struct streamer *streamer,
 
     }
 
+    // Check against DFT, if we are generating from sources
+    const int source_count = streamer->work_cfg->source_count;
+    int source_checks = streamer->work_cfg->grid_checks;
+    if (source_count > 0 && source_checks > 0) {
+
+        const double theta = streamer->work_cfg->theta;
+
+        int iu, iv;
+        double err_sum = 0, worst_err = 0; int err_samples = 0;
+        int check_counter = rand() % source_checks;
+        for (iv = -cfg->xA_size/2; iv < cfg->xA_size/2; iv++) {
+            for (iu = -cfg->xA_size/2; iu < cfg->xA_size/2; iu++) {
+                if (check_counter--) continue;
+                check_counter = source_checks;
+
+                double check_u = (work->subgrid_off_u+iu) / theta;
+                double check_v = (work->subgrid_off_v+iv) / theta;
+
+                // Generate visibility
+                complex double vis = 0;
+                int i;
+                for (i = 0; i < source_count; i++) {
+                    double ph =
+                        check_u * streamer->work_cfg->source_lmn[i*3+0] +
+                        check_v * streamer->work_cfg->source_lmn[i*3+1];
+                    vis += 1/streamer->work_cfg->source_corr[i]
+                        * (cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph));
+                }
+                vis /= (double)cfg->image_size * cfg->image_size;
+
+                // Check
+                double complex  vis_grid = subgrid[(iv+cfg->xM_size/2) * cfg->xM_size + iu + cfg->xM_size/2];
+                double err = cabs(vis_grid - vis);
+                err_sum += err * err;
+                worst_err = max(worst_err, err);
+                err_samples += 1;
+
+            }
+
+        }
+
+        #pragma omp atomic
+             streamer->grid_error_samples += err_samples;
+        #pragma omp atomic
+             streamer->grid_error_sum += err_sum;
+        if (worst_err > streamer->grid_worst_error) {
+            #pragma omp critical
+                 streamer->grid_worst_error = max(streamer->grid_worst_error, worst_err);
+        }
+
+    }
+
     streamer->recombine_time += get_time_ns() - recombine_start;
 
     struct vis_spec *const spec = &streamer->work_cfg->spec;
@@ -1003,7 +1042,8 @@ void *streamer_publish_stats(void *par)
         _append_stat(PARS(degrid_flops), 1 / sample_rate);
         _append_stat(PARS(produced_chunks), 1 / sample_rate);
         _append_stat(PARS(task_yields), 1 / sample_rate);
-        _append_stat(PARS(square_error_samples), 1 / sample_rate);
+        _append_stat(PARS(vis_error_samples), 1 / sample_rate);
+        _append_stat(PARS(grid_error_samples), 1 / sample_rate);
 #undef PARS
         config_send_statsd(streamer->work_cfg, stats);
         stats[0] = 0;
@@ -1039,16 +1079,13 @@ void *streamer_publish_stats(void *par)
                      worker_idle_time, 100 / sample_rate / streamer->num_workers);
 
         // Add gauges
-        double derror_sum = now.square_error_sum - last.square_error_sum;
-        uint64_t dsamples = now.square_error_samples - last.square_error_samples;
+        double derror_sum = now.vis_error_sum - last.vis_error_sum;
+        uint64_t dsamples = now.vis_error_samples - last.vis_error_samples;
         if (dsamples > 0) {
-            const int source_count = streamer->work_cfg->produce_source_count;
-            const int image_size = streamer->work_cfg->recombine.image_size;
-            double energy = (double)source_count / image_size / image_size;
             _append_stat(stats, "visibility_samples", streamer->subgrid_worker,
                          dsamples, 1);
             _append_stat(stats, "visibility_rmse", streamer->subgrid_worker,
-                         10 * log(sqrt(derror_sum / dsamples) / energy) / log(10), 1);
+                         10 * log(sqrt(derror_sum / dsamples) / streamer->work_cfg->source_energy) / log(10), 1);
         }
         _append_stat(stats, "degrid_tasks", streamer->subgrid_worker,
                      now.subgrid_tasks, 1);
@@ -1097,9 +1134,12 @@ bool streamer_init(struct streamer *streamer,
         streamer->task_start_time = streamer->recombine_time = 0;
     streamer->received_data = 0;
     streamer->received_subgrids = streamer->baselines_covered = 0;
-    streamer->square_error_samples = 0;
-    streamer->square_error_sum = 0;
-    streamer->worst_error = 0;
+    streamer->vis_error_samples = 0;
+    streamer->vis_error_sum = 0;
+    streamer->vis_worst_error = 0;
+    streamer->grid_error_samples = 0;
+    streamer->grid_error_sum = 0;
+    streamer->grid_worst_error = 0;
     streamer->degrid_flops = 0;
     streamer->produced_chunks = 0;
     streamer->task_yields = 0;
@@ -1285,16 +1325,19 @@ void streamer_free(struct streamer *streamer,
     printf("Operations: degrid %.1f GFLOP/s (%ld chunks)\n",
            (double)streamer->degrid_flops / stream_time / 1000000000,
            streamer->produced_chunks);
-    if (streamer->square_error_samples > 0) {
+    if (streamer->vis_error_samples > 0) {
         // Calculate root mean square error
-        double rmse = sqrt(streamer->square_error_sum / streamer->square_error_samples);
+        const double grid_rmse = sqrt(streamer->grid_error_sum / streamer->grid_error_samples);
+        const double vis_rmse = sqrt(streamer->vis_error_sum / streamer->vis_error_samples);
         // Normalise by assuming that the energy of sources is
         // distributed evenly to all grid points
-        const int source_count = streamer->work_cfg->produce_source_count;
-        const int image_size = streamer->work_cfg->recombine.image_size;
-        double energy = (double)source_count / image_size / image_size;
-        printf("Accuracy: RMSE %g, worst %g (%ld samples)\n", rmse / energy,
-               streamer->worst_error / energy, streamer->square_error_samples);
+        const double source_energy = streamer->work_cfg->source_energy;
+        printf("Grid accuracy: RMSE %g, worst %g (%ld samples)\n",
+               grid_rmse / source_energy, streamer->grid_worst_error / source_energy,
+               streamer->grid_error_samples);
+        printf("Vis accuracy: RMSE %g, worst %g (%ld samples)\n",
+               vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
+               streamer->vis_error_samples);
     }
 
     for (i = 0; i < streamer->writer_count; i++) {
