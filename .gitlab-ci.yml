@@ -10,8 +10,10 @@ test:
     # Unit tests
     - ./test_recombine
     # Standard test
-    - mpirun -n 2 ./iotest --rec-set=T05 | tee iotest.out
+    - make test_T05 | tee iotest.out
     - if grep ERROR iotest.out; then exit 1; fi
+    # Self-tests
+    - make test_small
     # Distributed tests
     - for i in $(seq 0 16); do
         mpirun -n 16 ./iotest --rec-set=T05 --facet-workers=$i > iotest$i.out;

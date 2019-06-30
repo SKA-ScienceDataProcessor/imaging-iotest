@@ -23,6 +23,7 @@ grid_avx2_%.c : ../scripts/mk_grid_avx2.py
 grid.o : $(GRID_FILES) grid.c
 	$(CC) $(CFLAGS) grid.c -c -ogrid.o
 
+# Self-tests
 .PHONY: test_T05 test_small
 test_T05: iotest
 	$(MPIRUN) -n 2 ./iotest --rec-set=T05 | grep RMSE
@@ -31,7 +32,7 @@ test_small: iotest
 		echo $$kern...; \
 		$(MPIRUN) -n 2 ./iotest --rec-set=small --vis-set=vlaa \
 			--subgrid-queue=128 --source-count=10 --grid=$$kern \
-			2>/dev/null | grep RMSE; \
+			--max-error=7e-5  2>/dev/null | grep RMSE || exit 1; \
 	done
 
 .PHONY: clean

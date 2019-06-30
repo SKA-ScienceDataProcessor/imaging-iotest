@@ -1290,9 +1290,10 @@ bool streamer_init(struct streamer *streamer,
     return true;
 }
 
-void streamer_free(struct streamer *streamer,
+bool streamer_free(struct streamer *streamer,
                    double stream_start)
 {
+    bool success = true;
 
     // Wait for writer to actually finish
     int i;
@@ -1338,6 +1339,13 @@ void streamer_free(struct streamer *streamer,
         printf("Vis accuracy: RMSE %g, worst %g (%ld samples)\n",
                vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
                streamer->vis_error_samples);
+        // Check against error bounds
+        if (max(streamer->grid_worst_error, streamer->grid_worst_error)
+            > streamer->work_cfg->vis_max_error * source_energy) {
+            printf("ERROR: Accuracy worse than threshold of %g!\n",
+                   streamer->work_cfg->vis_max_error);
+            success = false;
+        }
     }
 
     for (i = 0; i < streamer->writer_count; i++) {
@@ -1378,14 +1386,15 @@ void streamer_free(struct streamer *streamer,
         free(streamer->writer);
     }
 
+    return success;
 }
 
-void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
+int streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
 {
 
     struct streamer streamer;
     if (!streamer_init(&streamer, wcfg, subgrid_worker, producer_ranks)) {
-        return;
+        return 1;
     }
 
     double stream_start = get_time_ns();
@@ -1433,9 +1442,13 @@ void streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
             streamer_publish_stats(&streamer);
         }
     }
-
     } // #pragma omp parallel sections
 
-    streamer_free(&streamer, stream_start);
 
+    // Finalise streamer. Check for successful completion.
+    if (streamer_free(&streamer, stream_start)) {
+        return 0;
+    } else {
+        return 1;
+    }
 }

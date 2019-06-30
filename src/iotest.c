@@ -646,14 +646,15 @@ int main(int argc, char *argv[]) {
     }
 
     // Local run?
+    int result = 0;
     if (world_size == 1) {
 
         if (config.facet_workers > 0) {
             printf("%s pid %d role: Standalone producer\n", proc_name, getpid());
-            producer(&config, 0, 0);
+            result = producer(&config, 0, 0);
         } else {
             printf("%s pid %d role: Standalone streamer\n", proc_name, getpid());
-            streamer(&config, 0, 0);
+            result = streamer(&config, 0, 0);
         }
 
     } else {
@@ -673,7 +674,7 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            producer(&config, producer_id, streamer_ranks);
+            result = producer(&config, producer_id, streamer_ranks);
             free(streamer_ranks);
 
         } else if (world_rank < config.subgrid_workers) {
@@ -688,7 +689,7 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            streamer(&config, streamer_id, producer_ranks);
+            result = streamer(&config, streamer_id, producer_ranks);
             free(producer_ranks);
         }
 
@@ -712,5 +713,5 @@ int main(int argc, char *argv[]) {
     }
     MPI_Finalize();
 #endif
-    return 0;
+    return result;
 }
