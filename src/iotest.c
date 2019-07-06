@@ -561,11 +561,7 @@ bool set_cmdarg_config(int argc, char **argv,
         if (!config_set_statsd(cfg, statsd_addr, statsd_port)) {
             return false;
         }
-        if (gridder_x0 != 0) {
-            cfg->gridder_x0 = gridder_x0;
-        }
     }
-    cfg->vis_gridder_downsample = gridder_downsample;
 
     if (!config_set(cfg,
                     recombine_pars[0], recombine_pars[1],
@@ -576,16 +572,13 @@ bool set_cmdarg_config(int argc, char **argv,
         return false;
     }
     if (gridder_path[0]) {
-        if (!config_set_degrid(cfg, gridder_path[0] ? gridder_path : NULL)) {
-            invalid = 1;
-            fprintf(stderr, "ERROR: Could not access gridder at %s!", gridder_path);
-        }
-        if (gridder_x0 != 0) {
-            cfg->gridder_x0 = gridder_x0;
+        if (!config_set_degrid(cfg, gridder_path, gridder_x0, gridder_downsample)) {
+            fprintf(stderr, "ERROR: Could not access gridder at %s!\n", gridder_path);
+            return false;
         }
     }
     if (have_vis_spec) {
-        config_set_visibilities(cfg, &spec, spec.fov / 2 / cfg->gridder_x0,
+        config_set_visibilities(cfg, &spec, 
                                 vis_path[0] ? vis_path : NULL);
     }
     if (source_count > 0) {

@@ -65,8 +65,7 @@ struct streamer
     int subgrid_worker;
     int *producer_ranks;
 
-    struct sep_kernel_data kern;
-    bool have_kern;
+    struct sep_kernel_data *kern;
 
     // Incoming data queue (to be assembled)
     int queue_length;
@@ -538,7 +537,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         degrid_conv_uv_line(subgrid, subgrid_size, SG_stride, theta,
                             u-mid_u, v-mid_v, du, dv, if1 - if0,
                             min_u-mid_u, max_u-mid_u, min_v-mid_v, max_v-mid_v, conjugate,
-                            &streamer->kern, pvis, &flops);
+                            streamer->kern, pvis, &flops);
 
         // Check against DFT (one per row, maximum)
         if (source_checks > 0) {
@@ -866,7 +865,7 @@ void streamer_work(struct streamer *streamer,
     fft_shift(subgrid, cfg->xM_size);
 
     // Check some degridded example visibilities
-    if (work->check_degrid_path && streamer->have_kern && streamer->work_cfg->facet_workers > 0) {
+    if (work->check_degrid_path && streamer->kern && streamer->work_cfg->facet_workers > 0) {
         int nvis = get_npoints_hdf5(work->check_hdf5, "%s/vis", work->check_degrid_path);
         double *uvw_sg = read_hdf5(3 * sizeof(double) * nvis, work->check_hdf5,
                                    "%s/uvw_subgrid", work->check_degrid_path);
@@ -886,7 +885,7 @@ void streamer_work(struct streamer *streamer,
         bl.uvw_m = uvw_sg;
         degrid_conv_bl(subgrid, cfg->xM_size, cfg->xM_size, cfg->image_size, 0, 0,
                        -cfg->xM_size, cfg->xM_size, -cfg->xM_size, cfg->xM_size,
-                       &bl, 0, nvis, 0, 1, &streamer->kern);
+                       &bl, 0, nvis, 0, 1, streamer->kern);
         double err_sum = 0; int y;
         for (y = 0; y < nvis; y++) {
             double err = cabs(vis[y] - bl.vis[y]); err_sum += err*err;
@@ -953,7 +952,7 @@ void streamer_work(struct streamer *streamer,
     streamer->recombine_time += get_time_ns() - recombine_start;
 
     struct vis_spec *const spec = &streamer->work_cfg->spec;
-    if (spec->time_count > 0 && streamer->have_kern) {
+    if (spec->time_count > 0 && streamer->kern) {
 
         // Loop through baselines
         struct subgrid_work_bl *bl;
@@ -1128,7 +1127,6 @@ bool streamer_init(struct streamer *streamer,
     streamer->subgrid_worker = subgrid_worker;
     streamer->producer_ranks = producer_ranks;
 
-    streamer->have_kern = false;
     streamer->num_workers = omp_get_max_threads();
     streamer->wait_time = streamer->wait_in_time = streamer->degrid_time =
         streamer->task_start_time = streamer->recombine_time = 0;
@@ -1147,23 +1145,8 @@ bool streamer_init(struct streamer *streamer,
     streamer->finished = false;
 
     // Load gridding kernel
-    if (wcfg->gridder_path) {
-        if (load_sep_kern(wcfg->gridder_path, &streamer->kern))
-            return false;
-
-        // Reduce oversampling if requested
-        if (wcfg->vis_gridder_downsample) {
-            const int downsample = wcfg->vis_gridder_downsample;
-            streamer->kern.oversampling /= downsample;
-            int i;
-            for (i = 1; i < streamer->kern.oversampling; i++) {
-                memcpy(streamer->kern.data + i * streamer->kern.stride,
-                       streamer->kern.data + i * downsample * streamer->kern.stride,
-                       sizeof(double) * streamer->kern.size);
-            }
-        }
-
-        streamer->have_kern = true;
+    if (wcfg->gridder.data) {
+        streamer->kern = &wcfg->gridder;
     }
 
     // Calculate size of queues
@@ -1342,7 +1325,7 @@ bool streamer_free(struct streamer *streamer,
         // Check against error bounds
         if (max(streamer->grid_worst_error, streamer->grid_worst_error)
             > streamer->work_cfg->vis_max_error * source_energy) {
-            printf("ERROR: Accuracy worse than threshold of %g!\n",
+            printf("ERROR: Accuracy worse than RMSE threshold of %g!\n",
                    streamer->work_cfg->vis_max_error);
             success = false;
         }

@@ -2,6 +2,7 @@
 #ifndef CONFIG_H
 
 #include "recombine.h"
+#include "grid.h"
 
 // Specification of a visibility set
 struct vis_spec
@@ -67,9 +68,7 @@ struct work_config {
     double theta; // size of image in radians
     struct vis_spec spec;
     char *vis_path; // Visibility file (pattern)
-    char *gridder_path; // Gridding kernel file
-    double gridder_x0; // Accuracy limit of gridder
-    double *grid_correction; // Grid correction function
+    struct sep_kernel_data gridder; // uv gridder
 
     // Worker configuration
     int facet_workers; // number of facet workers
@@ -106,7 +105,6 @@ struct work_config {
     int vis_writer_count;
     int vis_fork_writer;
     int vis_check_existing;
-    int vis_gridder_downsample;
     int vis_checks, grid_checks;
     double vis_max_error;
 
@@ -138,10 +136,10 @@ bool config_assign_work(struct work_config *cfg,
 void config_free(struct work_config *cfg);
 
 void config_set_visibilities(struct work_config *cfg,
-                             struct vis_spec *spec, double theta,
+                             struct vis_spec *spec,
                              const char *vis_path);
 bool config_set_degrid(struct work_config *cfg,
-                       const char *gridder_path);
+                       const char *gridder_path, double gridder_x0, int downsample);
 
 bool config_set_statsd(struct work_config *cfg,
                        const char *node, const char *service);

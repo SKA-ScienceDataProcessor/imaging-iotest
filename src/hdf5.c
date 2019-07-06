@@ -536,7 +536,7 @@ bool write_vis_chunk(hid_t vis_group,
                          true, buf);
 }
 
-int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
+int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern, bool load_corr)
 {
 
     // Open file
@@ -585,20 +585,88 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern)
     // Read kernel
     if (H5Dread(dset, H5T_NATIVE_DOUBLE, kernel_memspace, H5S_ALL, H5P_DEFAULT, sepkern->data) < 0) {
         fprintf(stderr, "Failed to read separable kernel data from %s!\n", filename);
+        free(sepkern->data); sepkern->data = NULL;
         H5Sclose(kernel_memspace);
         H5Dclose(dset);
         H5Fclose(sepkern_f);
         return 1;
     }
     H5Sclose(kernel_memspace);
+    H5Dclose(dset);
+
+    // Read x0
+    dset = H5Dopen(sepkern_f, "sepkern/x0", H5P_DEFAULT);
+    if (dset < 0 ||
+        H5Sget_simple_extent_ndims(H5Dget_space(dset)) != 0 ||
+        H5Tget_size(H5Dget_type(dset)) != sizeof(double) ||
+        H5Dread(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &sepkern->x0) < 0 ) {
+
+        if (!load_corr) {
+            sepkern->x0 = 0.5;
+        } else {
+            fprintf(stderr, "Could not read 'sepkern/x0' from file %s!\n", filename);
+            if (dset >= 0) H5Dclose(dset);
+            free(sepkern->data); sepkern->data = NULL;
+            H5Fclose(sepkern_f);
+            return 1;
+        }
+    }
+    if (dset >= 0) H5Dclose(dset);
+
+    // Load correction if requested
+    if (!load_corr) {
+        sepkern->corr_size = 0;
+        sepkern->corr = NULL;
+        sepkern->x0 = 0.5;
+    } else {
+
+        // Open the data set
+        hid_t dset = H5Dopen(sepkern_f, "sepkern/corr", H5P_DEFAULT);
+        if (dset < 0) {
+            fprintf(stderr, "'sepkern/corr' dataset could not be opened from file %s!\n", filename);
+            free(sepkern->data); sepkern->data = NULL;
+            H5Fclose(sepkern_f);
+            return 1;
+        }
+
+        // Get size
+        hsize_t dims[1];
+        if (H5Sget_simple_extent_ndims(H5Dget_space(dset)) != 1 ||
+            H5Tget_size(H5Dget_type(dset)) != sizeof(double) ||
+            H5Sget_simple_extent_dims(H5Dget_space(dset), dims, NULL) < 0) {
+
+            fprintf(stderr, "'sepkern/corr' dataset has wrong format in file %s!\n", filename);
+            free(sepkern->data); sepkern->data = NULL;
+            H5Dclose(dset);
+            H5Fclose(sepkern_f);
+            return 1;
+        }
+
+        // Read
+        sepkern->corr_size = dims[0];
+        sepkern->corr = malloc(sizeof(double) * dims[0]);
+        if (H5Dread(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, sepkern->corr) < 0) {
+            fprintf(stderr, "Failed to read kernel correction data from %s!\n", filename);
+            free(sepkern->data); sepkern->data = NULL;
+            free(sepkern->corr); sepkern->corr = NULL;
+            H5Dclose(dset);
+            H5Fclose(sepkern_f);
+            return 1;
+        }
+        H5Dclose(dset);
+
+    }
 
     // Close file
-    H5Dclose(dset);
     H5Fclose(sepkern_f);
 
-    printf("seperable kernel: support %d (x%d oversampled)\n",
-           sepkern->size, sepkern->oversampling);
-
+    if(sepkern->corr) {
+        printf("separable kernel: support %d (x%d oversampled), %d correction resolution, x0=%.2g\n",
+               sepkern->size, sepkern->oversampling, sepkern->corr_size, sepkern->x0);
+    } else {
+        printf("separable kernel: support %d (x%d oversampled)\n",
+               sepkern->size, sepkern->oversampling);
+    }
     return 0;
 }
 

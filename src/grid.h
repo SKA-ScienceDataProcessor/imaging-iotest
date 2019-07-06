@@ -97,13 +97,16 @@ static inline double uv_to_ha(struct ant_config *cfg, int a1, int a2,
     return asin((x*v0 - y*uv_m[0]) / (y*y + x*x));
 }
 
-// Separable kernel data
+// Separable kernel data (with correction)
 struct sep_kernel_data
 {
-    double *data; // Assumed to be real
-    int size;
-    int stride;
-    int oversampling;
+    // grid-plane kernel
+    int size, stride, oversampling;
+    double *data; // [oversampling][stride]
+    // image-plane correction
+    int corr_size;
+    double *corr; // [corr_size]
+    double x0;
 };
 
 // Performance counter data
@@ -135,7 +138,7 @@ bool write_vis_chunk(hid_t vis_group,
 
 int load_vis(const char *filename, struct vis_data *vis,
              double min_len, double max_len);
-int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern);
+int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern, bool load_corr);
 
 void frac_coord(int grid_size, int oversample,
                 double u, int *x, int *fx);

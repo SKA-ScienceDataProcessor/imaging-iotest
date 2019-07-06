@@ -421,7 +421,7 @@ int T05_degrid()
     char *in_file = "../data/grid/T05_in.h5";
 
     struct sep_kernel_data kern;
-    if (load_sep_kern(in_file, &kern)) {
+    if (load_sep_kern(in_file, &kern, false)) {
         return 1;
     }
 

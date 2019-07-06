@@ -574,7 +574,6 @@ void config_init(struct work_config *cfg)
 
     // Initialise structure
     memset(cfg, 0, sizeof(*cfg));
-    cfg->gridder_x0 = 0.5;
     cfg->config_dump_baseline_bins = false;
     cfg->config_dump_subgrid_work = false;
     cfg->produce_parallel_cols = false;
@@ -589,7 +588,6 @@ void config_init(struct work_config *cfg)
     cfg->vis_writer_count = 2;
     cfg->vis_fork_writer = false;
     cfg->vis_check_existing = false;
-    cfg->vis_gridder_downsample = 0;
     cfg->vis_checks = 16384;
     cfg->grid_checks = 4096;
     cfg->vis_max_error = 1;
@@ -633,8 +631,8 @@ void config_free(struct work_config *cfg)
 {
     free(cfg->vis_path);
     free(cfg->facet_work);
-    free(cfg->gridder_path);
-    free(cfg->grid_correction);
+    free(cfg->gridder.data); cfg->gridder.data = NULL;
+    free(cfg->gridder.corr); cfg->gridder.corr = NULL;
 
     int i;
     for (i = 0; i < cfg->subgrid_workers * cfg->subgrid_max_work; i++) {
@@ -653,12 +651,12 @@ void config_free(struct work_config *cfg)
 }
 
 void config_set_visibilities(struct work_config *cfg,
-                             struct vis_spec *spec, double theta,
+                             struct vis_spec *spec,
                              const char *vis_path)
 {
     // Copy
     cfg->spec = *spec;
-    cfg->theta = theta;
+    cfg->theta = spec->fov / 2 / cfg->gridder.x0 ;
     if (vis_path)
         cfg->vis_path = strdup(vis_path);
 
@@ -675,54 +673,58 @@ void config_set_visibilities(struct work_config *cfg,
     cfg->spec.dec_cos = cos(cfg->spec.dec);
 }
 
-bool config_set_degrid(struct work_config *cfg, const char *gridder_path)
+bool config_set_degrid(struct work_config *cfg, const char *gridder_path,
+                       double gridder_x0, int downsample)
 {
     if (gridder_path) {
 
         // Clear existing data, if any
-        cfg->gridder_x0 = 0.5;
-        free(cfg->gridder_path); cfg->gridder_path = 0;
-        free(cfg->grid_correction); cfg->grid_correction = 0;
+        free(cfg->gridder.data); free(cfg->gridder.corr);
+        memset(&cfg->gridder, 0, sizeof(struct sep_kernel_data));
 
-        // Get gridder's accuracy limit
-        double *px0 = (double *)read_hdf5(sizeof(double), gridder_path, "sepkern/x0");
-        if (!px0) return false;
-        printf("Gridder %s with x0=%g\n", gridder_path, *px0);
-
-        // Get grid correction dimensions
-        int ncorr = get_npoints_hdf5(gridder_path, "sepkern/corr");
-
-        // Read grid correction
-        double *grid_corr = read_hdf5(sizeof(double) * ncorr, gridder_path, "sepkern/corr");
-        if (!grid_corr) {
-            fprintf(stderr, "ERROR: Could not read grid correction from %s!\n", gridder_path);
+        // Load gridder
+        if (load_sep_kern(gridder_path, &cfg->gridder, true)) {
             return false;
+        }
+        // Override x0
+        if (gridder_x0 != 0) {
+            cfg->gridder.x0 = gridder_x0;
+        }
+
+        // Reduce oversampling if requested
+        if (downsample) {
+            cfg->gridder.oversampling /= downsample;
+            printf("Downsampling gridder to %d", cfg->gridder.oversampling);
+            int i;
+            for (i = 1; i < cfg->gridder.oversampling; i++) {
+                memcpy(cfg->gridder.data + i * cfg->gridder.stride,
+                       cfg->gridder.data + i * downsample * cfg->gridder.stride,
+                       sizeof(double) * cfg->gridder.size);
+            }
         }
 
         // Need to rescale? This is linear, therefore worth a
         // warning. Might want to do a "sinc" interpolation instead at
         // some point? Could be more appropriate.
-        if (ncorr != cfg->recombine.image_size) {
-            if (ncorr % cfg->recombine.image_size != 0) {
+        const int ncorr = cfg->gridder.corr_size, image_size = cfg->recombine.image_size;
+        if (ncorr != image_size) {
+            if (ncorr % image_size != 0) {
                 fprintf(stderr, "WARNING: Rescaling grid correction from %d to %d points!\n",
-                        ncorr, cfg->recombine.image_size);
+                        ncorr, image_size);
             }
             int i;
-            cfg->grid_correction = (double *)malloc(sizeof(double) * cfg->recombine.image_size);
-            for (i = 0; i < cfg->recombine.image_size; i++) {
-                double j = (double)i * ncorr / cfg->recombine.image_size;
+            double *grid_correction = (double *)malloc(sizeof(double) * image_size);
+            for (i = 0; i < image_size; i++) {
+                double j = (double)i * ncorr / image_size;
                 int j0 = (int)floor(j),  j1 = (j0 + 1) % ncorr;
                 double w = j - j0;
-                cfg->grid_correction[i] = (1 - w) * grid_corr[j0] + w * grid_corr[j1];
+                grid_correction[i] = (1 - w) * cfg->gridder.corr[j0] + w * cfg->gridder.corr[j1];
             }
-            free(grid_corr);
-        } else {
-            cfg->grid_correction = grid_corr;
+            free(cfg->gridder.corr);
+            cfg->gridder.corr = grid_correction;
+            cfg->gridder.corr_size = image_size;
         }
 
-        cfg->gridder_x0 = *px0;
-        cfg->gridder_path = strdup(gridder_path);
-        free(px0);
     }
 
     return true;
@@ -897,10 +899,10 @@ void config_set_sources(struct work_config *cfg, int count, unsigned int seed)
         cfg->source_lmn[3*i+1] = m;
         cfg->source_lmn[3*i+2] = n;
         // Get grid correction to apply
-        if (cfg->grid_correction) {
+        if (cfg->gridder.corr) {
             cfg->source_corr[i] =
-                cfg->grid_correction[(il + image_size) % image_size] *
-                cfg->grid_correction[(im + image_size) % image_size];
+                cfg->gridder.corr[(il + image_size) % image_size] *
+                cfg->gridder.corr[(im + image_size) % image_size];
             // Could cause divisions by zero down the line
             assert(cfg->source_corr[i] != 0);
         } else {
