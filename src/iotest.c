@@ -436,7 +436,6 @@ bool set_cmdarg_config(int argc, char **argv,
             break;
         case Opt_max_error:
             nscan = sscanf(optarg, "%lg", &cfg->vis_max_error);
-            printf("max_error=%g\n", cfg->vis_max_error);
             if (nscan != 1) {
                 invalid=true; fprintf(stderr, "ERROR: Could not parse 'max-error' option!\n");
             }
@@ -578,8 +577,7 @@ bool set_cmdarg_config(int argc, char **argv,
         }
     }
     if (have_vis_spec) {
-        config_set_visibilities(cfg, &spec, 
-                                vis_path[0] ? vis_path : NULL);
+        config_set_visibilities(cfg, &spec, vis_path[0] ? vis_path : NULL);
     }
     if (source_count > 0) {
         config_set_sources(cfg, source_count, source_seed);
