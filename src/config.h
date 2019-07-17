@@ -12,6 +12,7 @@ struct vis_spec
     double dec; // declination (radian)
     double time_start; int time_count; int time_chunk; double time_step; // hour angle (radian)
     double freq_start; int freq_count; int freq_chunk; double freq_step; // (Hz)
+    double w_offset; // for testing
     // Cached hour angle / declination cosinus & sinus
     double *ha_sin, *ha_cos;
     double dec_sin, dec_cos;
@@ -51,8 +52,8 @@ struct subgrid_work_bl
 // Work to do for a subgrid
 struct subgrid_work
 {
-    int iu, iv; // Column/row number. Used for grouping, so must be consistent across work items!
-    int subgrid_off_u, subgrid_off_v; // Midpoint offset in grid coordinates
+    int iu, iv, iw; // Column/row/plane number. Used for grouping, so must be consistent across work items!
+    int subgrid_off_u, subgrid_off_v, subgrid_off_w; // Midpoint offset in grid coordinates
     int nbl; // Baselines in this work bin
     char *check_path, *check_fct_path,
          *check_degrid_path, *check_hdf5; // check data if set
@@ -63,12 +64,13 @@ struct subgrid_work
 
 struct work_config {
 
-    // Fundamental dimensions
-    // double lam; // size of entire grid in wavelenghts
-    double theta; // size of image in radians
+    // Fundamental dimensions (uvw grid / cubes)
+    double theta; // size of (padded) image in radians (1/uvstep)
+    double wstep; // distance of w-planes
+    int sg_step, sg_step_w; // uv/w size of effective subgrid cube size
     struct vis_spec spec;
     char *vis_path; // Visibility file (pattern)
-    struct sep_kernel_data gridder; // uv gridder
+    struct sep_kernel_data gridder, w_gridder; // uv/w gridder
 
     // Worker configuration
     int facet_workers; // number of facet workers

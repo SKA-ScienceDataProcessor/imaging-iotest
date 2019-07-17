@@ -526,10 +526,13 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         // Determine coordinates
         double u = uvw_lambda(bl_data, time, 0, 0);
         double v = uvw_lambda(bl_data, time, 0, 1);
+        double w = uvw_lambda(bl_data, time, 0, 2);
         double du = uvw_lambda(bl_data, time, 1, 0) - u;
         double dv = uvw_lambda(bl_data, time, 1, 1) - v;
+        double dw = uvw_lambda(bl_data, time, 1, 2) - w;
+        //printf("w=%g dw=%g\n", w, dw);
         if (conjugate) {
-            u *= -1; du *= -1; v *= -1; dv *= -1;
+            u *= -1; du *= -1; v *= -1; dv *= -1; w *= -1; dw *= -1;
         }
 
         // Degrid a line of visibilities
@@ -549,6 +552,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                 double complex vis_out = pvis[check_counter];
                 double check_u = u + du * check_counter;
                 double check_v = v + dv * check_counter;
+                double check_w = w + dw * check_counter;
 
                 // Check that we actually generated a visibility here,
                 // negate if necessary
@@ -561,7 +565,8 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                     for (i = 0; i < source_count; i++) {
                         double ph =
                             check_u * streamer->work_cfg->source_lmn[i*3+0] +
-                            check_v * streamer->work_cfg->source_lmn[i*3+1];
+                            check_v * streamer->work_cfg->source_lmn[i*3+1] +
+                            check_w * streamer->work_cfg->source_lmn[i*3+2];
                         vis += cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph);
                     }
                     vis /= (double)image_size * image_size;
@@ -613,6 +618,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     struct recombine2d_config *const cfg = &streamer->work_cfg->recombine;
     const double theta = streamer->work_cfg->theta;
+    const double wstep = streamer->work_cfg->wstep;
 
     double start = get_time_ns();
 
@@ -903,6 +909,7 @@ void streamer_work(struct streamer *streamer,
     if (source_count > 0 && source_checks > 0) {
 
         const double theta = streamer->work_cfg->theta;
+        const double wstep = streamer->work_cfg->wstep;
 
         int iu, iv;
         double err_sum = 0, worst_err = 0; int err_samples = 0;
@@ -914,6 +921,7 @@ void streamer_work(struct streamer *streamer,
 
                 double check_u = (work->subgrid_off_u+iu) / theta;
                 double check_v = (work->subgrid_off_v+iv) / theta;
+                double check_w = work->subgrid_off_w * wstep;
 
                 // Generate visibility
                 complex double vis = 0;
@@ -921,7 +929,8 @@ void streamer_work(struct streamer *streamer,
                 for (i = 0; i < source_count; i++) {
                     double ph =
                         check_u * streamer->work_cfg->source_lmn[i*3+0] +
-                        check_v * streamer->work_cfg->source_lmn[i*3+1];
+                        check_v * streamer->work_cfg->source_lmn[i*3+1] +
+                        check_w * streamer->work_cfg->source_lmn[i*3+2];
                     vis += 1/streamer->work_cfg->source_corr[i]
                         * (cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph));
                 }
@@ -1323,7 +1332,7 @@ bool streamer_free(struct streamer *streamer,
                vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
                streamer->vis_error_samples);
         // Check against error bounds
-        if (max(streamer->grid_worst_error, streamer->grid_worst_error)
+        if (max(streamer->grid_worst_error, streamer->vis_worst_error)
             > streamer->work_cfg->vis_max_error * source_energy) {
             printf("ERROR: Accuracy worse than RMSE threshold of %g!\n",
                    streamer->work_cfg->vis_max_error);
