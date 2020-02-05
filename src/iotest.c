@@ -229,7 +229,8 @@ enum Opts
         Opt_grid, Opt_grid_x0, Opt_grid_downsample, Opt_vis_set,
         Opt_recombine, Opt_rec_aa, Opt_rec_set,
         Opt_rec_load_facet, Opt_rec_load_facet_hdf5, Opt_batch_rows,
-        Opt_facet_workers, Opt_parallel_cols, Opt_dont_retain_bf,
+        Opt_facet_workers, Opt_plan_workers,
+        Opt_parallel_cols, Opt_dont_retain_bf,
         Opt_source_count, Opt_source_seed, Opt_vis_checks, Opt_grid_checks,
         Opt_max_error, Opt_send_queue,
         Opt_bls_per_task, Opt_subgrid_queue, Opt_task_queue, Opt_visibility_queue,
@@ -272,6 +273,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"max-error",       required_argument, 0, Opt_max_error },
 
         {"facet-workers",   required_argument, 0, Opt_facet_workers },
+        {"plan-workers",    required_argument, 0, Opt_plan_workers },
         {"parallel-columns",no_argument,       &cfg->produce_parallel_cols, true },
         {"dont-retain-bf",  no_argument,       &cfg->produce_retain_bf, false },
         {"bls-per-task",    required_argument, 0, Opt_bls_per_task },
@@ -298,6 +300,7 @@ bool set_cmdarg_config(int argc, char **argv,
     double subgrid_threshold = 1e-8, subgrid_fct_threshold = 1e-8,
            subgrid_degrid_threshold = 1e-8;
     int facet_workers = (world_size + 1) / 2;
+    int plan_workers = world_size;
     double gridder_x0 = 0; int gridder_downsample = 0;
     char gridder_path[256]; char vis_path[256];
     char statsd_addr[256]; char statsd_port[256] = "8125";
@@ -321,7 +324,7 @@ bool set_cmdarg_config(int argc, char **argv,
             have_vis_spec = true;
             break;
         case Opt_fov: spec.fov = atof(optarg); break;
-        case Opt_dec: spec.dec = atof(optarg); break;
+        case Opt_dec: spec.dec = atof(optarg) * atan(1) * 4 / 180; break;
         case Opt_time:
             nscan = sscanf(optarg, "%lg:%lg/%d/%d",
                            &spec.time_start, &spec.time_step,
@@ -408,6 +411,12 @@ bool set_cmdarg_config(int argc, char **argv,
             nscan = sscanf(optarg, "%d", &facet_workers);
             if (nscan != 1) {
                 invalid=true; fprintf(stderr, "ERROR: Could not parse 'facet-workers' option!\n");
+            }
+            break;
+        case Opt_plan_workers:
+            nscan = sscanf(optarg, "%d", &plan_workers);
+            if (nscan != 1) {
+                invalid=true; fprintf(stderr, "ERROR: Could not parse 'plan-workers' option!\n");
             }
             break;
         case Opt_source_count:
@@ -542,6 +551,7 @@ bool set_cmdarg_config(int argc, char **argv,
         printf("\n");
         printf("Distribution Parameters:\n");
         printf("  --facet-workers=<val>  Number of workers holding facets (default: half)\n");
+        printf("  --plan-workers=<val>   Override number of workers to plan for\n");
         printf("  --dont-retain-bf       Discard BF term. Saves memory at expense of compute.\n");
         printf("  --parallel-columns     Work on grid columns in parallel. Worse for distribution.\n");
         printf("  --send-queue=<N>       Outgoing subgrid queue length (default 8)\n");
@@ -555,7 +565,6 @@ bool set_cmdarg_config(int argc, char **argv,
     }
 
     // Set configuration
-    int subgrid_workers = world_size - facet_workers;
     if (statsd_addr[0]) {
         if (!config_set_statsd(cfg, statsd_addr, statsd_port)) {
             return false;
@@ -584,6 +593,7 @@ bool set_cmdarg_config(int argc, char **argv,
     }
 
     // Make work assignment
+    int subgrid_workers = plan_workers - facet_workers;
     if (!config_assign_work(cfg, facet_workers, subgrid_workers))
         return false;
 
@@ -636,6 +646,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Plane size matches world size? Generally means we were only
+    // test-running the configuration phase.
+    if (config.facet_workers + config.subgrid_workers) {
+        printf("Plan size does not match world size, aborting.\n");
+        exit(0);
+    }
+
     // Local run?
     int result = 0;
     if (world_size == 1) {
@@ -654,7 +671,7 @@ int main(int argc, char *argv[]) {
         int i;
 
         if (world_rank >= config.subgrid_workers) {
-	    int producer_id = world_rank - config.subgrid_workers;
+            int producer_id = world_rank - config.subgrid_workers;
             printf("%s pid %d role: Producer %d\n", proc_name, getpid(), producer_id);
 
             int *streamer_ranks = NULL;
@@ -669,8 +686,8 @@ int main(int argc, char *argv[]) {
             free(streamer_ranks);
 
         } else if (world_rank < config.subgrid_workers) {
-	  int streamer_id = world_rank;
-	  printf("%s pid %d role: Streamer %d\n", proc_name, getpid(), streamer_id);
+            int streamer_id = world_rank;
+            printf("%s pid %d role: Streamer %d\n", proc_name, getpid(), streamer_id);
 
             int *producer_ranks = NULL;
             if (config.facet_workers > 0) {
@@ -698,9 +715,9 @@ int main(int argc, char *argv[]) {
     MPI_Ibarrier(MPI_COMM_WORLD, &barrier);
     for (;;) {
         int flag = 0;
-	MPI_Test(&barrier, &flag, MPI_STATUS_IGNORE);
-	if (flag) break;
-	usleep(100);
+        MPI_Test(&barrier, &flag, MPI_STATUS_IGNORE);
+        if (flag) break;
+        usleep(100);
     }
     MPI_Finalize();
 #endif

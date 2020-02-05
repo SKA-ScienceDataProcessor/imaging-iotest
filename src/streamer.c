@@ -486,9 +486,6 @@ void *streamer_writer_thread(void *param)
     return NULL;
 }
 
-static double min(double a, double b) { return a > b ? b : a; }
-static double max(double a, double b) { return a < b ? b : a; }
-
 uint64_t streamer_degrid_worker(struct streamer *streamer,
                                 struct bl_data *bl_data,
                                 int SG_stride, double complex *subgrid,
@@ -597,7 +594,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
     if (worst_err > streamer->vis_worst_error) {
         // Likely happens rarely enough that a critical section won't be a problem
         #pragma omp critical
-           streamer->vis_worst_error = max(streamer->vis_worst_error, worst_err);
+           streamer->vis_worst_error = fmax(streamer->vis_worst_error, worst_err);
     }
     #pragma omp atomic
         streamer->degrid_flops += flops;
@@ -651,10 +648,10 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     double f1 = uvw_m_to_l(1, bl_data->freq[if1-1]);
     double *uvw0 = bl_data->uvw_m + 3*it0;
     double *uvw1 = bl_data->uvw_m + 3*(it1-1);
-    double min_u = min(min(uvw0[0]*f0, uvw0[0]*f1), min(uvw1[0]*f0, uvw1[0]*f1));
-    double min_v = min(min(uvw0[1]*f0, uvw0[1]*f1), min(uvw1[1]*f0, uvw1[1]*f1));
-    double max_u = max(max(uvw0[0]*f0, uvw0[0]*f1), max(uvw1[0]*f0, uvw1[0]*f1));
-    double max_v = max(max(uvw0[1]*f0, uvw0[1]*f1), max(uvw1[1]*f0, uvw1[1]*f1));
+    double min_u = fmin(fmin(uvw0[0]*f0, uvw0[0]*f1), fmin(uvw1[0]*f0, uvw1[0]*f1));
+    double min_v = fmin(fmin(uvw0[1]*f0, uvw0[1]*f1), fmin(uvw1[1]*f0, uvw1[1]*f1));
+    double max_u = fmax(fmax(uvw0[0]*f0, uvw0[0]*f1), fmax(uvw1[0]*f0, uvw1[0]*f1));
+    double max_v = fmax(fmax(uvw0[1]*f0, uvw0[1]*f1), fmax(uvw1[1]*f0, uvw1[1]*f1));
 
     // Check whether time chunk fall into positive u. We use this
     // for deciding whether coordinates are going to get flipped
@@ -940,7 +937,7 @@ void streamer_work(struct streamer *streamer,
                 double complex  vis_grid = subgrid[(iv+cfg->xM_size/2) * cfg->xM_size + iu + cfg->xM_size/2];
                 double err = cabs(vis_grid - vis);
                 err_sum += err * err;
-                worst_err = max(worst_err, err);
+                worst_err = fmax(worst_err, err);
                 err_samples += 1;
 
             }
@@ -953,7 +950,7 @@ void streamer_work(struct streamer *streamer,
              streamer->grid_error_sum += err_sum;
         if (worst_err > streamer->grid_worst_error) {
             #pragma omp critical
-                 streamer->grid_worst_error = max(streamer->grid_worst_error, worst_err);
+                 streamer->grid_worst_error = fmax(streamer->grid_worst_error, worst_err);
         }
 
     }
@@ -1332,7 +1329,7 @@ bool streamer_free(struct streamer *streamer,
                vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
                streamer->vis_error_samples);
         // Check against error bounds
-        if (max(streamer->grid_worst_error, streamer->vis_worst_error)
+        if (fmax(streamer->grid_worst_error, streamer->vis_worst_error)
             > streamer->work_cfg->vis_max_error * source_energy) {
             printf("ERROR: Accuracy worse than RMSE threshold of %g!\n",
                    streamer->work_cfg->vis_max_error);

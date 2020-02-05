@@ -45,7 +45,9 @@ struct subgrid_work_bl
 {
     int a1, a2; // Baseline antennas
     int chunks; // Number of (time,frequency) chunks overlapping
-    int sg_min_u, sg_max_u, sg_min_v, sg_max_v; // Subgrid bounds of baseline
+    int sg_min_u, sg_max_u,
+        sg_min_v, sg_max_v,
+        sg_min_w, sg_max_w; // Subgrid bounds of baseline
     struct subgrid_work_bl *next;
 };
 
@@ -67,7 +69,7 @@ struct work_config {
     // Fundamental dimensions (uvw grid / cubes)
     double theta; // size of (padded) image in radians (1/uvstep)
     double wstep; // distance of w-planes
-    int sg_step, sg_step_w; // uv/w size of effective subgrid cube size
+    int sg_step, sg_step_w; // effective subgrid cube size (step length as above)
     struct vis_spec spec;
     char *vis_path; // Visibility file (pattern)
     struct sep_kernel_data gridder, w_gridder; // uv/w gridder

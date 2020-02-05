@@ -59,7 +59,7 @@ void bl_bounding_box(struct vis_spec *spec,
 }
 
 void bl_bounding_subgrids(struct vis_spec *spec,
-                          double lam_sg, int a1, int a2,
+                          double lam_sg, double wstep_sg, int a1, int a2,
                           int *sg_min, int *sg_max)
 {
     double uvw_l_min[3], uvw_l_max[3];
@@ -68,13 +68,19 @@ void bl_bounding_subgrids(struct vis_spec *spec,
                     0, spec->freq_count-1,
                     uvw_l_min, uvw_l_max);
 
-    //printf("BL u %g-%g v %g-%g\n", uvw_l_min[0], uvw_l_max[0], uvw_l_min[1], uvw_l_max[1]);
-
     // Convert into subgrid indices
     sg_min[0] = (int)round(uvw_l_min[0]/lam_sg);
     sg_min[1] = (int)round(uvw_l_min[1]/lam_sg);
+    sg_min[2] = (int)round(uvw_l_min[2]/wstep_sg);
     sg_max[0] = (int)round(uvw_l_max[0]/lam_sg);
     sg_max[1] = (int)round(uvw_l_max[1]/lam_sg);
+    sg_max[2] = (int)round(uvw_l_max[2]/wstep_sg);
+
+    /* printf("BL %d/%d u %g-%g (%d-%d) v %g-%g (%d-%d) w %g-%g (%d-%d)\n", */
+    /*        a1,a2, */
+    /*        uvw_l_min[0], uvw_l_max[0], sg_min[0], sg_max[0], */
+    /*        uvw_l_min[1], uvw_l_max[1], sg_min[1], sg_max[1], */
+    /*        uvw_l_min[2], uvw_l_max[2], sg_min[2], sg_max[2]); */
 }
 
 struct worker_prio
@@ -90,8 +96,10 @@ static int compare_prio_nbl(const void *_w1, const void *_w2)
     return w1->nbl > w2->nbl;
 }
 
-static int bin_baseline(struct vis_spec *spec, double lam_sg, int nsubgrid,
-                        int a1, int a2, int iu, int iv)
+static int bin_baseline(struct vis_spec *spec,
+                        double lam_sg, double wstep_sg,
+                        int nsubgrid, int nwlevels,
+                        int a1, int a2, int iu, int iv, int iw)
 {
     assert (iu >= 0 && iu < nsubgrid);
     assert (iv >= 0 && iv < nsubgrid);
@@ -99,8 +107,10 @@ static int bin_baseline(struct vis_spec *spec, double lam_sg, int nsubgrid,
 
     double sg_min_u = lam_sg*(iu-nsubgrid/2) - lam_sg/2;
     double sg_min_v = lam_sg*(iv-nsubgrid/2) - lam_sg/2;
+    double sg_min_w = wstep_sg*(iw-nwlevels/2) - wstep_sg/2;
     double sg_max_u = lam_sg*(iu-nsubgrid/2) + lam_sg/2;
     double sg_max_v = lam_sg*(iv-nsubgrid/2) + lam_sg/2;
+    double sg_max_w = wstep_sg*(iw-nwlevels/2) + wstep_sg/2;
     int ntchunk = spec_time_chunks(spec);
     int nfchunk = spec_freq_chunks(spec);
 
@@ -147,7 +157,8 @@ static int bin_baseline(struct vis_spec *spec, double lam_sg, int nsubgrid,
             }
 
             if (uvw_l_min[0] < sg_max_u && uvw_l_max[0] > sg_min_u &&
-                uvw_l_min[1] < sg_max_v && uvw_l_max[1] > sg_min_v) {
+                uvw_l_min[1] < sg_max_v && uvw_l_max[1] > sg_min_v &&
+                uvw_l_min[2] < sg_max_w && uvw_l_max[2] > sg_min_w) {
 
                 if (fstep == 1) {
                     // Found a chunk
@@ -168,80 +179,115 @@ static int bin_baseline(struct vis_spec *spec, double lam_sg, int nsubgrid,
     return chunks;
 }
 
+static int min(int a, int b) { return a > b ? b : a; }
+static int max(int a, int b) { return a < b ? b : a; }
+
+
+// Collect work for a specific subgrid cube
+static void collect_work(struct vis_spec *spec,
+                         double lam_sg, double wstep_sg,
+                         int nsubgrid, int nwlevels,
+                         int *sg_mins, int *sg_maxs,
+                         int iu, int iv, int iw,
+                         int *nchunks, struct subgrid_work_bl **work)
+{
+
+    int a1, a2, bl=0;
+    for (a1 = 0; a1 < spec->cfg->ant_count; a1++) {
+        for (a2 = a1+1; a2 < spec->cfg->ant_count; a2++, bl++) {
+            int *sg_min = sg_mins + bl * 3, *sg_max = sg_maxs + bl * 3;
+
+            // Bounds check
+            if (!(iv >= nsubgrid/2+sg_min[1] && iv <= nsubgrid/2+sg_max[1] &&
+                  iu >= nsubgrid/2+sg_min[0] && iu <= nsubgrid/2+sg_max[0] &&
+                  iw >= nwlevels/2+sg_min[2] && iw <= nwlevels/2+sg_max[2]) &&
+                !(iv >= nsubgrid/2-sg_max[1] && iv <= nsubgrid/2-sg_min[1] &&
+                  iu >= nsubgrid/2-sg_max[0] && iu <= nsubgrid/2-sg_min[0] &&
+                  iw >= nwlevels/2-sg_max[2] && iw <= nwlevels/2-sg_min[2]))
+                continue;
+
+            // Count actual number of chunks
+            int chunks = bin_baseline(spec, lam_sg, wstep_sg,
+                                      nsubgrid, nwlevels,
+                                      a1, a2, iu, iv, iw);
+            if (!chunks)
+                continue;
+
+            // Sum up
+            *nchunks+=chunks;
+
+            // Make sure we don't add a baseline twice
+            assert(!*work || (*work)->a1 != a1 || (*work)->a2 != a2);
+
+            // Add work structure
+            struct subgrid_work_bl *wbl = (struct subgrid_work_bl *)
+                malloc(sizeof(struct subgrid_work_bl));
+            wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
+            wbl->next = *work;
+            wbl->sg_min_u = sg_min[0];
+            wbl->sg_min_v = sg_min[1];
+            wbl->sg_min_w = sg_min[2];
+            wbl->sg_max_u = sg_max[0];
+            wbl->sg_max_v = sg_max[1];
+            wbl->sg_max_w = sg_max[2];
+            *work = wbl;
+            fflush(stdout);
+
+
+        }
+    }
+
+}
+
 // Bin baselines per overlapping subgrid
-static int collect_baselines(struct vis_spec *spec,
-                             double lam, double lam_sg,
+static void collect_baselines(struct vis_spec *spec,
+                             double lam, double lam_sg, double wstep_sg,
+                             bool dump_baselines,
                              int **pnchunks, struct subgrid_work_bl ***pbls,
-                             bool dump_baselines)
+                             int *pnsubgrid, int *pnwlevels)
 {
 
     // Determine baseline bounding boxes
     int nbl_total = spec->cfg->ant_count * (spec->cfg->ant_count - 1) / 2;
-    int *sg_mins = (int *)malloc(sizeof(int) * 2 * nbl_total),
-        *sg_maxs = (int *)malloc(sizeof(int) * 2 * nbl_total);
+    int *sg_mins = (int *)malloc(sizeof(int) * 3 * nbl_total),
+        *sg_maxs = (int *)malloc(sizeof(int) * 3 * nbl_total);
     int a1, a2, bl = 0;
-    int max_sg_u = 0, max_sg_v = 0;
+    int max_sg_u = 0, max_sg_v = 0, max_sg_w = 0;
     for (a1 = 0; a1 < spec->cfg->ant_count; a1++) {
         for (a2 = a1+1; a2 < spec->cfg->ant_count; a2++, bl++) {
-            bl_bounding_subgrids(spec, lam_sg, a1, a2, sg_mins + bl * 2, sg_maxs + bl * 2);
-            if (max_sg_u < abs(sg_mins[bl*2+0])) max_sg_u = abs(sg_mins[bl*2+0]);
-            if (max_sg_v < abs(sg_mins[bl*2+1])) max_sg_v = abs(sg_mins[bl*2+1]);
+            int *mins = sg_mins + bl * 3,
+                *maxs = sg_maxs + bl * 3;
+            bl_bounding_subgrids(spec, lam_sg, wstep_sg, a1, a2,
+                                 mins, maxs);
+            max_sg_u = max(max_sg_u, max(-mins[0], maxs[0]));
+            max_sg_v = max(max_sg_v, max(-mins[1], maxs[1]));
+            max_sg_w = max(max_sg_w, max(-mins[2], maxs[2]));
         }
     }
 
     // Determine number of subgrid bins we need
     int nsubgrid = 2 * (int)ceil(1. / 2 / (lam_sg / lam)) + 3;
-    if (nsubgrid > 2*max_sg_u+1 && nsubgrid > 2*max_sg_v+1)
 
-    //printf("max_sg_u = %d, max_sg_v = %d, nsubgrid = %d\n", max_sg_u, max_sg_v, nsubgrid);
+    printf("max_sg_u=%d, max_sg_v=%d, max_sg_w=%d nsubgrid=%d\n",
+           max_sg_u, max_sg_v, max_sg_w, nsubgrid);
+    nsubgrid = min(nsubgrid, max(2*max_sg_u+1, 2*max_sg_v+1));
+
+    // As well as w-levels
+    int nwlevels = 2 * max_sg_w + 1;
 
     // Allocate chunk statistics
-    int *nchunks = (int *)calloc(sizeof(int), nsubgrid * nsubgrid);
+    int *nchunks = (int *)calloc(sizeof(int), nsubgrid * nsubgrid * nwlevels);
     struct subgrid_work_bl **bls = (struct subgrid_work_bl **)
-        calloc(sizeof(struct subgrid_work_bl *), nsubgrid * nsubgrid);
-    int iv, iu;
-#pragma omp parallel for collapse(2) schedule(dynamic,8)
+        calloc(sizeof(struct subgrid_work_bl *), nsubgrid * nsubgrid * nwlevels);
+    int iv, iu, iw;
+    #pragma omp parallel for collapse(3) schedule(dynamic,8)
     for (iv = 0; iv < nsubgrid; iv++) {
         for (iu = 0; iu < nsubgrid; iu++) {
-            int a1, a2, bl=0;
-            for (a1 = 0; a1 < spec->cfg->ant_count; a1++) {
-                for (a2 = a1+1; a2 < spec->cfg->ant_count; a2++, bl++) {
-                    int *sg_min = sg_mins + bl * 2, *sg_max = sg_maxs + bl * 2;
-
-                    // Bounds check
-                    if (!(iv >= nsubgrid/2+sg_min[1] && iv <= nsubgrid/2+sg_max[1] &&
-                          iu >= nsubgrid/2+sg_min[0] && iu <= nsubgrid/2+sg_max[0]) &&
-                        !(iv >= nsubgrid/2-sg_max[1] && iv <= nsubgrid/2-sg_min[1] &&
-                          iu >= nsubgrid/2-sg_max[0] && iu <= nsubgrid/2-sg_min[0]))
-                        continue;
-
-                    // Count actual number of chunks
-                    int chunks = bin_baseline(spec, lam_sg, nsubgrid,
-                                              a1, a2, iu, iv);
-                    if (!chunks)
-                        continue;
-
-                    // Sum up
-                    nchunks[iv*nsubgrid + iu]+=chunks;
-
-                    // Make sure we don't add a baseline twice
-                    if (bls[iv * nsubgrid + iu]) {
-                        assert(bls[iv * nsubgrid + iu]->a1 != a1 ||
-                               bls[iv * nsubgrid + iu]->a2 != a2);
-                    }
-
-                    // Add work structure
-                    struct subgrid_work_bl *wbl = (struct subgrid_work_bl *)
-                        malloc(sizeof(struct subgrid_work_bl));
-                    wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
-                    wbl->next = bls[iv * nsubgrid + iu];
-                    wbl->sg_min_u = sg_min[0];
-                    wbl->sg_min_v = sg_min[1];
-                    wbl->sg_max_u = sg_max[0];
-                    wbl->sg_max_v = sg_max[1];
-                    bls[iv * nsubgrid + iu] = wbl;
-
-                }
+            for (iw = 0; iw < nwlevels; iw++) {
+                int ix = iw * nsubgrid*nsubgrid + iv * nsubgrid + iu;
+                collect_work(spec, lam_sg, wstep_sg, nsubgrid, nwlevels,
+                             sg_mins, sg_maxs, iu, iv, iw,
+                             nchunks + ix, bls + ix);
             }
         }
     }
@@ -250,15 +296,17 @@ static int collect_baselines(struct vis_spec *spec,
 
     // Produce dump if requested
     if (dump_baselines) {
-        printf("Baseline bins:\n---\niu,iv,chunks\n");
+        printf("Baseline bins:\n---\niu,iv,iw,chunks\n");
         for (iv = 0; iv < nsubgrid; iv++) {
             for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
-                int chunks = 0; struct subgrid_work_bl *bl;
-                for (bl = bls[nsubgrid*iv+iu]; bl; bl=bl->next) {
-                    chunks += bl->chunks;
-                }
-                if (chunks) {
-                    printf("%d,%d,%d\n", iu, iv, chunks);
+                for (iw = 0; iw < nwlevels; iw++) {
+                    int chunks = 0; struct subgrid_work_bl *bl;
+                    for (bl = bls[nsubgrid*nsubgrid*iw+nsubgrid*iv+iu]; bl; bl=bl->next) {
+                        chunks += bl->chunks;
+                    }
+                    if (chunks) {
+                        printf("%d,%d,%d,%d\n", iu, iv, iw, chunks);
+                    }
                 }
             }
         }
@@ -267,7 +315,8 @@ static int collect_baselines(struct vis_spec *spec,
 
     *pnchunks = nchunks;
     *pbls = bls;
-    return nsubgrid;
+    *pnsubgrid = nsubgrid;
+    *pnwlevels = nwlevels;
 }
 
 // Pop given number of baselines from the start of the linked list
@@ -289,7 +338,6 @@ static struct subgrid_work_bl *pop_chunks(struct subgrid_work_bl **bls, int n, i
     return first;
 }
 
-
 static bool generate_subgrid_work_assignment(struct work_config *cfg)
 {
     struct vis_spec *spec = &cfg->spec;
@@ -304,20 +352,24 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
     int *nbl; struct subgrid_work_bl **bls;
     double start = get_time_ns();
     const double lam = config_lambda(cfg);
-    int nsubgrid = collect_baselines(spec, lam, cfg->sg_step / cfg->theta,
-                                     &nbl, &bls, cfg->config_dump_baseline_bins);
+    int nsubgrid, nwlevels;
+    collect_baselines(spec, lam,
+                      cfg->sg_step / cfg->theta,
+                      cfg->sg_step_w * cfg->wstep,
+                      cfg->config_dump_baseline_bins,
+                      &nbl, &bls, &nsubgrid, &nwlevels);
     printf(" %g s\n", get_time_ns() - start);
 
     // Count how many sub-grids actually have visibilities
     int npop = 0, nbl_total = 0, nbl_max = 0;
-    int iu, iv;
-    for (iv = 0; iv < nsubgrid; iv++) {
-        for (iu = 0; iu < nsubgrid; iu++) {
-            if (nbl[iv * nsubgrid + iu]) {
-                npop++;
-                nbl_total+=nbl[iv * nsubgrid + iu];
-                if (nbl[iv * nsubgrid + iu] > nbl_max)
-                    nbl_max = nbl[iv * nsubgrid + iu];
+    int iu, iv, iw;
+    for (iw = 0; iw < nwlevels; iw++) {
+        for (iv = 0; iv < nsubgrid; iv++) {
+            for (iu = 0; iu < nsubgrid; iu++) {
+                int n = nbl[iw * nsubgrid*nsubgrid + iv * nsubgrid + iu];
+                if (n) npop++;
+                nbl_total += n;
+                nbl_max = max(n, nbl_max);
             }
         }
     }
@@ -336,15 +388,17 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
     // column. Note that we ignore grid data at u < 0, as transferring
     // half the grid is enough to reconstruct a real-valued image.
     int nwork = 0, max_work_column = 0;
-    for (iu = 0; iu < nsubgrid; iu++) {
-        int nwork_start = nwork;
-        for (iv = 0; iv < nsubgrid; iv++) {
-            int nv = nbl[iv * nsubgrid + iu];
-            nwork += (nv + work_max_nbl - 1) / work_max_nbl;
+    for (iw = 0; iw < nwlevels; iw++) {
+        for (iu = 0; iu < nsubgrid; iu++) {
+            int nwork_start = nwork;
+            for (iv = 0; iv < nsubgrid; iv++) {
+                int nv = nbl[iw * nsubgrid*nsubgrid + iv * nsubgrid + iu];
+                nwork += (nv + work_max_nbl - 1) / work_max_nbl;
+            }
+            // How much work in this column?
+            if (nwork - nwork_start > max_work_column)
+                max_work_column = nwork-nwork_start;
         }
-        // How much work in this column?
-        if (nwork - nwork_start > max_work_column)
-            max_work_column = nwork-nwork_start;
     }
 
     // Allocate work description
@@ -363,13 +417,14 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
 
     // Go through columns and assign work
     int iworker = 0, iwork = 0;
-    for (iu = 0; iu < nsubgrid; iu++) {
+    for (iw = 0; iw < nwlevels; iw++) {
+      for (iu = 0; iu < nsubgrid; iu++) {
 
         // Generate column of work
         int start_bl;
         for (iv = 0; iv < nsubgrid; iv++) {
-            int nv = nbl[iv * nsubgrid + iu];
-            for (start_bl = 0; start_bl < nv; start_bl += work_max_nbl) {
+            int ix = iw * nsubgrid*nsubgrid + iv * nsubgrid + iu;
+            for (start_bl = 0; start_bl < nbl[ix]; start_bl += work_max_nbl) {
 
                 // Assign work to next worker
                 struct subgrid_work *work =
@@ -377,12 +432,11 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
 
                 work->iu = iu - nsubgrid/2;
                 work->iv = iv - nsubgrid/2;
-                work->iw = 0;
+                work->iw = iw - nwlevels/2;
                 work->subgrid_off_u = cfg->sg_step * work->iu;
                 work->subgrid_off_v = cfg->sg_step * work->iv;
                 work->subgrid_off_w = cfg->sg_step_w * work->iw;
-                work->bls = pop_chunks(&bls[iv * nsubgrid + iu], work_max_nbl,
-                                       &work->nbl);
+                work->bls = pop_chunks(&bls[ix], work_max_nbl, &work->nbl);
 
                 // Save back how many chunks were assigned
                 worker_prio[iworker].nbl += work->nbl;
@@ -394,6 +448,7 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
 
             }
         }
+      }
     }
 
     // Determine average
@@ -479,13 +534,14 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
     printf("Assigned workers %d chunks min, %d chunks max (after %d swaps)\n", min_vis, max_vis, nswaps);
 
     if (cfg->config_dump_subgrid_work) {
-        printf("Subgrid work (after swaps):\n---\nworker,work,chunks\n");
+        printf("Subgrid work (after swaps):\n---\nworker,work,chunks,iu,iv,iw\n");
         for (i = 0; i < cfg->subgrid_workers; i++) {
             int j;
             for (j = 0; j < cfg->subgrid_max_work; j++) {
                 struct subgrid_work *work = cfg->subgrid_work + i* cfg->subgrid_max_work+j;
                 if (work->nbl > 0) {
-                    printf("%d,%d,%d\n", i,j, work->nbl);
+                    printf("%d,%d,%d,%d,%d,%d\n", i,j, work->nbl,
+                           work->iu, work->iv, work->iw);
                 }
             }
         }
@@ -680,7 +736,7 @@ void config_set_visibilities(struct work_config *cfg,
     assert(max_lm < 0.5);
     double max_n = 1 - sqrt(1 - 2*max_lm*max_lm);
     cfg->wstep = cfg->w_gridder.x0 / max_n;
-    printf("Grid resolution u/v: %g, w: %g", 1/cfg->theta, cfg->wstep);
+    printf("Grid resolution u/v: %g lambda, w: %g lambda\n", 1/cfg->theta, cfg->wstep);
     cfg->spec.w_offset = cfg->wstep;
 
     // Calculate uvw cube split
