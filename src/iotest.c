@@ -648,7 +648,7 @@ int main(int argc, char *argv[]) {
 
     // Plane size matches world size? Generally means we were only
     // test-running the configuration phase.
-    if (config.facet_workers + config.subgrid_workers) {
+    if (config.facet_workers + config.subgrid_workers != world_size) {
         printf("Plan size does not match world size, aborting.\n");
         exit(0);
     }

@@ -257,7 +257,9 @@ bool producer_fill_facet(struct recombine2d_config *cfg,
         // Make sure strides are as expected, then read
         // TODO: Clearly HDF5 can do partial reads, optimise
         assert (cfg->F_stride0 == cfg->yB_size && cfg->F_stride1 == 1);
-        double complex *data = read_hdf5(cfg->F_size, work->hdf5, work->path);
+        double complex *data;
+#pragma omp critical
+        data = read_hdf5(cfg->F_size, work->hdf5, work->path);
 
         // Copy
         memcpy(F, data + offset / sizeof(double complex), size);
@@ -339,10 +341,11 @@ static int get_subgrid_off_v(struct work_config *wcfg, int iu, int iv)
 }
 
 
-static void producer_work(struct work_config *wcfg,
-                          struct producer_stream *prod,
-                          struct producer_stream *producers,
-                          double complex *F, double complex *BF)
+// Produce subgrid data from facet data at some w-level
+static void producer_facets_work(struct work_config *wcfg,
+                                 struct producer_stream *prod,
+                                 struct producer_stream *producers,
+                                 double complex *F, double complex *BF)
 {
 
     int ifacet;
@@ -353,7 +356,6 @@ static void producer_work(struct work_config *wcfg,
             recombine2d_pf1_ft1_omp(&prod->worker,
                                     F + ifacet * wcfg->recombine.F_size / sizeof(*F),
                                     BF + ifacet * wcfg->recombine.BF_size / sizeof(*BF));
-    // TODO: Generate facet on the fly
 
     int iu;
     if (wcfg->produce_parallel_cols) {
@@ -424,6 +426,57 @@ static void producer_work(struct work_config *wcfg,
     }
 }
 
+double producer_work(struct work_config *wcfg,
+                     struct producer_stream *producers,
+                     int facet_work_count,
+                     double complex *F, double complex *BF)
+{
+    struct recombine2d_config *const cfg = &wcfg->recombine;
+    struct producer_stream *prod = producers + omp_get_thread_num();
+    struct facet_work *const fwork = wcfg->facet_work +
+        prod->facet_worker * wcfg->facet_max_work;
+
+    // Start of facet data creation
+    double generate_start;
+    #pragma omp single copyprivate(generate_start)
+    {
+        printf("Filling %d facet%s...\n", facet_work_count, facet_work_count != 1 ? "s" : "");
+        generate_start = get_time_ns();
+    }
+
+    // Parallelise over facets and facet chunks
+    int ifacet; int x0; const int x0_chunk = 256;
+    #pragma omp for schedule(dynamic) collapse(2)
+    for (ifacet = 0; ifacet < facet_work_count; ifacet++) {
+        for (x0 = 0; x0 < cfg->yB_size; x0+=x0_chunk) {
+            int x0_end = x0 + x0_chunk;
+            if (x0_end > cfg->yB_size) x0_end = cfg->yB_size;
+            double complex *pF =
+                F + ifacet * wcfg->recombine.F_size / sizeof(*F)
+                + x0*cfg->F_stride0;
+            producer_fill_facet(cfg, fwork + ifacet, pF,
+                                wcfg->source_count, wcfg->source_xy,
+                                wcfg->source_corr,
+                                x0, x0_end);
+        }
+    }
+
+    // Done creating facet data
+    double run_start;
+#pragma omp single copyprivate(run_start)
+    {
+        printf(" %.2f s\n", get_time_ns() - generate_start);
+
+        run_start = get_time_ns();
+        printf("Streaming...\n");
+    }
+
+    // Start generating subgrid data
+    producer_facets_work(wcfg, prod, producers, F, BF);
+
+    return run_start;
+}
+
 int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
 {
 
@@ -433,12 +486,15 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
     const int BF_batch = wcfg->produce_batch_rows;
     const int send_queue_length = wcfg->produce_queue_length;
 
-    // Get number of facets we need to cover, warn if it is bigger than 1
+    // Get number of facets we need to cover
     int facet_work_count = 0; int ifacet;
     for (ifacet = 0; ifacet < wcfg->facet_max_work; ifacet++)
         if (fwork[ifacet].set)
             facet_work_count++;
 
+    // Determine required buffer sizes. If we don't retain the full
+    // padded facet, we still need enough space to be able to work on
+    // one batch of rows.
     uint64_t F_size = facet_work_count * cfg->F_size;
     uint64_t BF_size = wcfg->produce_retain_bf ?
         facet_work_count * cfg->BF_size :
@@ -448,7 +504,7 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
            (double)(F_size + BF_size) / 1000000000,
            facet_work_count * (double)recombine2d_worker_memory(cfg) / 1000000000);
 
-    // Create global memory buffers
+    // Create global memory buffers for facet at current w-level
     double complex *F = (double complex *)calloc(1, F_size);
     double complex *BF = (double complex *)malloc(BF_size);
     if (!F || (!BF && wcfg->produce_retain_bf)) {
@@ -457,37 +513,6 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
         return 1;
     }
 
-    // Fill facet with random data (TODO: Handle the case that we are
-    // meant to cover more than one facet...)
-    printf("Filling %d facet%s...\n", facet_work_count, facet_work_count != 1 ? "s" : "");
-    double generate_start = get_time_ns();
-    int x0; const int x0_chunk = 256;
-    for (ifacet = 0; ifacet < facet_work_count; ifacet++) {
-#pragma omp parallel for schedule(dynamic)
-        for (x0 = 0; x0 < cfg->yB_size; x0+=x0_chunk) {
-            int x0_end = x0 + x0_chunk;
-            if (x0_end > cfg->yB_size) x0_end = cfg->yB_size;
-            double complex *pF =
-                F + ifacet * wcfg->recombine.F_size / sizeof(*F)
-                  + x0*cfg->F_stride0;
-            producer_fill_facet(cfg, fwork + ifacet, pF,
-                                wcfg->source_count, wcfg->source_xy, wcfg->source_corr,
-                                x0, x0_end);
-        }
-    }
-    printf(" %.2f s\n", get_time_ns() - generate_start);
-
-    // Debugging (TODO: remove)
-    if (false) {
-        int x1;
-        for (x0 = 0; x0 < cfg->yB_size; x0++) {
-            for (x1 = 0; x1 < cfg->yB_size; x1++) {
-                printf("%8.2f%+8.2fi\t", creal(F[x0*cfg->F_stride0+x1*cfg->F_stride1]),
-                       cimag(F[x0*cfg->F_stride0+x1*cfg->F_stride1]));
-            }
-            puts("");
-        }
-    }
 
     // Global structures
     double run_start;
@@ -497,16 +522,20 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
     #pragma omp parallel
     {
 
+        // Perform planning (need to know thread count for that)
         producer_count = omp_get_num_threads();
         #pragma omp single
         {
-
             // Do global planning
-            printf("Planning for %d threads...\n", producer_count); double planning_start = get_time_ns();
-            fftw_plan BF_plan = recombine2d_bf_plan(cfg, BF_batch, BF, FFTW_MEASURE);
+            printf("Planning for %d threads...\n", producer_count);
+            double planning_start = get_time_ns();
+            fftw_plan BF_plan = recombine2d_bf_plan(cfg, BF_batch,
+                                                    BF, FFTW_MEASURE);
 
-            // Create producers (which involves planning, and therefore is not parallelised)
-            producers = (struct producer_stream *) malloc(sizeof(struct producer_stream) * producer_count);
+            // Create producers (which involves planning, and
+            // therefore is not parallelised)
+            producers = (struct producer_stream *) malloc(
+                sizeof(struct producer_stream) * producer_count);
             int i;
             for (i = 0; i < producer_count; i++) {
                 init_producer_stream(cfg, producers + i, facet_worker, facet_work_count,
@@ -514,18 +543,16 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
                                      BF_batch, BF_plan, send_queue_length);
             }
 
-            // End of planning phase
             printf(" %.2f s\n", get_time_ns() - planning_start);
-            run_start = get_time_ns();
-            printf("Streaming...\n");
+
         }
 
-        // Do work
-        struct producer_stream *prod = producers + omp_get_thread_num();
-        producer_work(wcfg, prod, producers, F, BF);
+        // Start creating facets and streaming subgrid data out
+        producer_work(wcfg, producers, facet_work_count, F, BF);
 
 #ifndef NO_MPI
         // Wait for remaining packets to be sent
+        struct producer_stream *prod = producers + omp_get_thread_num();
         double start = get_time_ns();
         MPI_Status statuses[send_queue_length];
         MPI_Waitall(send_queue_length, prod->requests, statuses);
