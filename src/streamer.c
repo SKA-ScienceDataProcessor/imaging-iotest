@@ -180,7 +180,9 @@ void streamer_ireceive(struct streamer *streamer,
     // Mark later subgrid repeats for skipping
     int iw;
     for (iw = subgrid_work+1; iw < streamer->work_cfg->subgrid_max_work; iw++)
-        if (work[iw].iu == work[subgrid_work].iu && work[iw].iv == work[subgrid_work].iv)
+        if (work[iw].iu == work[subgrid_work].iu &&
+            work[iw].iv == work[subgrid_work].iv &&
+            work[iw].iw == work[subgrid_work].iw)
             streamer->skip_receive[iw] = true;
 
     // Walk through all facets we expect contributions from, save requests
@@ -200,6 +202,8 @@ void streamer_ireceive(struct streamer *streamer,
         const int tag = make_subgrid_tag(streamer->work_cfg,
                                          streamer->subgrid_worker, subgrid_work,
                                          facet_worker, facet_work);
+        //printf("Receiving iu=%d iv=%d iw=%d tag=%d facet=%d\n",
+        //       work[subgrid_work].iu, work[subgrid_work].iv, work[subgrid_work].iw, tag, facet_work);
         MPI_Irecv(nmbf_slot(streamer, slot, facet),
                   xM_yN_size * xM_yN_size, MPI_DOUBLE_COMPLEX,
                   streamer->producer_ranks[facet_worker], tag, MPI_COMM_WORLD,
@@ -294,7 +298,9 @@ int streamer_receive_a_subgrid(struct streamer *streamer,
     const int iwork = streamer->request_work[slot];
     int iw;
     for (iw = iwork; iw < streamer->work_cfg->subgrid_max_work; iw++)
-        if (work[iw].iu == work[iwork].iu && work[iw].iv == work[iwork].iv)
+        if (work[iw].iu == work[iwork].iu &&
+            work[iw].iv == work[iwork].iv &&
+            work[iw].iw == work[iwork].iw)
             streamer_work(streamer, iw, data_slot);
 
     // Return the (now free) slot
@@ -489,9 +495,13 @@ void *streamer_writer_thread(void *param)
 uint64_t streamer_degrid_worker(struct streamer *streamer,
                                 struct bl_data *bl_data,
                                 int SG_stride, double complex *subgrid,
-                                double mid_u, double mid_v, int iu, int iv, bool conjugate,
+                                double mid_u, double mid_v, double mid_w,
+                                int iu, int iv, int iw,
+                                bool conjugate,
                                 int it0, int it1, int if0, int if1,
-                                double min_u, double max_u, double min_v, double max_v,
+                                double min_u, double max_u,
+                                double min_v, double max_v,
+                                double min_w, double max_w,
                                 double complex *vis_data)
 {
     struct vis_spec *const spec = &streamer->work_cfg->spec;
@@ -535,8 +545,11 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         // Degrid a line of visibilities
         double complex *pvis = vis_data + (time-it0)*spec->freq_chunk;
         degrid_conv_uv_line(subgrid, subgrid_size, SG_stride, theta,
-                            u-mid_u, v-mid_v, du, dv, if1 - if0,
-                            min_u-mid_u, max_u-mid_u, min_v-mid_v, max_v-mid_v, conjugate,
+                            u-mid_u, v-mid_v, w-mid_w, du, dv, dw, if1 - if0,
+                            min_u-mid_u, max_u-mid_u,
+                            min_v-mid_v, max_v-mid_v,
+                            min_w-mid_w, max_w-mid_w,
+                            conjugate,
                             streamer->kern, pvis, &flops);
 
         // Check against DFT (one per row, maximum)
@@ -616,6 +629,8 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     struct recombine2d_config *const cfg = &streamer->work_cfg->recombine;
     const double theta = streamer->work_cfg->theta;
     const double wstep = streamer->work_cfg->wstep;
+    const double sg_step = streamer->work_cfg->sg_step;
+    const double sg_step_w = streamer->work_cfg->sg_step_w;
 
     double start = get_time_ns();
 
@@ -624,10 +639,13 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     // brittle, should get refactored at some point!
     double sg_mid_u = work->subgrid_off_u / theta;
     double sg_mid_v = work->subgrid_off_v / theta;
-    double sg_min_u = (work->subgrid_off_u - cfg->xA_size / 2) / theta;
-    double sg_min_v = (work->subgrid_off_v - cfg->xA_size / 2) / theta;
-    double sg_max_u = (work->subgrid_off_u + cfg->xA_size / 2) / theta;
-    double sg_max_v = (work->subgrid_off_v + cfg->xA_size / 2) / theta;
+    double sg_mid_w = work->subgrid_off_w * wstep;
+    double sg_min_u = (work->subgrid_off_u - sg_step / 2) / theta;
+    double sg_min_v = (work->subgrid_off_v - sg_step / 2) / theta;
+    double sg_min_w = (work->subgrid_off_w - sg_step_w / 2) * wstep;
+    double sg_max_u = (work->subgrid_off_u + sg_step / 2) / theta;
+    double sg_max_v = (work->subgrid_off_v + sg_step / 2) / theta;
+    double sg_max_w = (work->subgrid_off_w + sg_step_w / 2) * wstep;
     if (sg_min_v > cfg->image_size / theta / 2) {
         sg_min_v -= cfg->image_size / theta / 2;
         sg_max_v -= cfg->image_size / theta / 2;
@@ -650,8 +668,10 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     double *uvw1 = bl_data->uvw_m + 3*(it1-1);
     double min_u = fmin(fmin(uvw0[0]*f0, uvw0[0]*f1), fmin(uvw1[0]*f0, uvw1[0]*f1));
     double min_v = fmin(fmin(uvw0[1]*f0, uvw0[1]*f1), fmin(uvw1[1]*f0, uvw1[1]*f1));
+    double min_w = fmin(fmin(uvw0[2]*f0, uvw0[2]*f1), fmin(uvw1[2]*f0, uvw1[2]*f1));
     double max_u = fmax(fmax(uvw0[0]*f0, uvw0[0]*f1), fmax(uvw1[0]*f0, uvw1[0]*f1));
     double max_v = fmax(fmax(uvw0[1]*f0, uvw0[1]*f1), fmax(uvw1[1]*f0, uvw1[1]*f1));
+    double max_w = fmax(fmax(uvw0[2]*f0, uvw0[2]*f1), fmax(uvw1[2]*f0, uvw1[2]*f1));
 
     // Check whether time chunk fall into positive u. We use this
     // for deciding whether coordinates are going to get flipped
@@ -669,11 +689,13 @@ bool streamer_degrid_chunk(struct streamer *streamer,
         double swap;
         swap = min_u; min_u = -max_u; max_u = -swap;
         swap = min_v; min_v = -max_v; max_v = -swap;
+        swap = min_w; min_w = -max_w; max_w = -swap;
     }
 
     // Check for overlap between baseline chunk and subgrid
     if (!(min_u < sg_max_u && max_u > sg_min_u &&
-          min_v < sg_max_v && max_v > sg_min_v))
+          min_v < sg_max_v && max_v > sg_min_v &&
+          min_w < sg_max_w && max_w > sg_min_w))
         return false;
 
     // Determine least busy writer
@@ -695,11 +717,14 @@ bool streamer_degrid_chunk(struct streamer *streamer,
 
     // Do degridding
     const size_t chunk_vis_size = sizeof(double complex) * spec->freq_chunk * spec->time_chunk;
-    uint64_t flops = streamer_degrid_worker(streamer, bl_data, SG_stride, subgrid,
-                                            sg_mid_u, sg_mid_v, work->iu, work->iv, !positive_u,
-                                            it0, it1, if0, if1,
-                                            sg_min_u, sg_max_u, sg_min_v, sg_max_v,
-                                            chunk ? chunk->vis : alloca(chunk_vis_size));
+    uint64_t flops = streamer_degrid_worker(
+        streamer, bl_data, SG_stride, subgrid,
+        sg_mid_u, sg_mid_v, sg_mid_w,
+        work->iu, work->iv, work->iw,
+        !positive_u,
+        it0, it1, if0, if1,
+        sg_min_u, sg_max_u, sg_min_v, sg_max_v, sg_min_w, sg_max_w,
+        chunk ? chunk->vis : alloca(chunk_vis_size));
     #pragma omp atomic
       streamer->degrid_time += get_time_ns() - start;
 
@@ -773,8 +798,8 @@ void streamer_task(struct streamer *streamer,
         // that we have failed to account for some visibilities in the
         // plan!
         if (bl2->chunks != nchunks)
-            printf("WARNING: subgrid (%d/%d) baseline (%d-%d) %d chunks planned, %d actual!\n",
-                   work->iu, work->iv, bl2->a1, bl2->a2, bl2->chunks, nchunks);
+            printf("WARNING: subgrid (%d/%d/%d) baseline (%d-%d) %d chunks planned, %d actual!\n",
+                   work->iu, work->iv, work->iw, bl2->a1, bl2->a2, bl2->chunks, nchunks);
 
         free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
     }
@@ -860,7 +885,8 @@ void streamer_work(struct streamer *streamer,
         }
         free(approx_ref);
         double rmse = sqrt(err_sum / cfg->xM_size / cfg->xM_size);
-        printf("%sSubgrid %d/%d RMSE %g\n", rmse > work->check_threshold ? "ERROR: " : "",
+        printf("%sSubgrid %d/%d RMSE %g\n",
+               rmse > work->check_threshold ? "ERROR: " : "",
                work->iu, work->iv, rmse);
 
     }
@@ -944,6 +970,10 @@ void streamer_work(struct streamer *streamer,
 
         }
 
+        const double source_energy = streamer->work_cfg->source_energy;
+        printf("%d/%d/%d rmse=%g\n", work->iu, work->iv, work->iw,
+               sqrt(err_sum / err_samples) / source_energy);
+
         #pragma omp atomic
              streamer->grid_error_samples += err_samples;
         #pragma omp atomic
@@ -987,7 +1017,8 @@ void streamer_work(struct streamer *streamer,
                 streamer->task_start_time += get_time_ns() - task_start;
         }
 
-        printf("Subgrid %d/%d (%d baselines)\n", work->iu, work->iv, i_bl);
+        printf("Subgrid %d/%d/%d (%d baselines)\n",
+               work->iu, work->iv, work->iw, i_bl);
         fflush(stdout);
         streamer->baselines_covered += i_bl;
 

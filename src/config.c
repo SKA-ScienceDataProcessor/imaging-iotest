@@ -737,7 +737,6 @@ void config_set_visibilities(struct work_config *cfg,
     double max_n = 1 - sqrt(1 - 2*max_lm*max_lm);
     cfg->wstep = cfg->w_gridder.x0 / max_n;
     printf("Grid resolution u/v: %g lambda, w: %g lambda\n", 1/cfg->theta, cfg->wstep);
-    cfg->spec.w_offset = cfg->wstep;
 
     // Calculate uvw cube split
     assert(cfg->recombine.image_size != 0); // Must be set previously
@@ -943,7 +942,9 @@ bool config_assign_work(struct work_config *cfg,
 
     // Warn if we have multiple facets per worker
     if (cfg->facet_max_work > 1) {
-        printf("WARNING: %d facets, but only %d workers. Consider more MPI ranks.\n",
+        printf("WARNING: %d facets, but only %d workers. This means that facets\n"
+               "         compete for send slots, which can cause deadlock unless\n"
+               "         the subgrid queue is over-dimensioned. Consider more ranks!\n",
                cfg->facet_count, cfg->facet_workers);
     }
 
@@ -978,7 +979,7 @@ void config_set_sources(struct work_config *cfg, int count, unsigned int seed)
         // Determine coordinates in l/m/n system
         double l = il * cfg->theta / image_size;
         double m = im * cfg->theta / image_size;
-        double n = sqrt(1 - l*l - m*m);
+        double n = sqrt(1 - l*l - m*m) - 1;
         cfg->source_lmn[3*i+0] = l;
         cfg->source_lmn[3*i+1] = m;
         cfg->source_lmn[3*i+2] = n;
@@ -1015,7 +1016,6 @@ void vis_spec_to_bl_data(struct bl_data *bl, struct vis_spec *spec,
                      spec->ha_sin[i], spec->ha_cos[i],
                      spec->dec_sin, spec->dec_cos,
                      bl->uvw_m + i*3);
-        bl->uvw_m[i*3+2] = spec->w_offset;
     }
     bl->freq_count = spec->freq_count;
     bl->freq = (double *)malloc(sizeof(double) * spec->freq_count);

@@ -143,14 +143,14 @@ int make_subgrid_tag(struct work_config *wcfg,
                      int facet_worker_ix, int facet_work_ix) {
     // Need to encode only the work items, as with MPI both the sender
     // and the receiver will be identified already by the message.
-    return facet_work_ix * wcfg->subgrid_max_work + subgrid_work_ix;
+    return facet_work_ix + subgrid_work_ix * wcfg->facet_max_work;
 }
 
 void producer_send_subgrid(struct work_config *wcfg, struct producer_stream *prod,
                            int facet_work_ix,
                            double complex *NMBF_BF,
                            int subgrid_off_u, int subgrid_off_v,
-                           int iu, int iv)
+                           int iu, int iv, int iw)
 {
     struct recombine2d_config *cfg = &wcfg->recombine;
 
@@ -168,7 +168,11 @@ void producer_send_subgrid(struct work_config *wcfg, struct producer_stream *pro
             iworker * wcfg->subgrid_max_work;
         int iwork;
         for (iwork = 0; iwork < wcfg->subgrid_max_work; iwork++) {
-            if (work_list[iwork].nbl && work_list[iwork].iu == iu && work_list[iwork].iv == iv) break;
+            if (work_list[iwork].nbl &&
+                work_list[iwork].iu == iu &&
+                work_list[iwork].iv == iv &&
+                work_list[iwork].iw == iw)
+                break;
         }
         if (iwork >= wcfg->subgrid_max_work)
             continue;
@@ -208,6 +212,8 @@ void producer_send_subgrid(struct work_config *wcfg, struct producer_stream *pro
         if (prod->streamer_ranks) {
             int tag = make_subgrid_tag(wcfg, iworker, iwork,
                                        prod->facet_worker, facet_work_ix);
+            //printf("Sending iu=%d iv=%d iw=%d tag=%d facet=%d\n",
+            //       iu, iv, iw, tag, facet_work_ix);
             double start = get_time_ns();
             MPI_Isend(send_buf, cfg->xM_yN_size * cfg->xM_yN_size, MPI_DOUBLE_COMPLEX,
                       prod->streamer_ranks[iworker], tag, MPI_COMM_WORLD, &prod->requests[indx]);
@@ -221,12 +227,14 @@ void producer_send_subgrid(struct work_config *wcfg, struct producer_stream *pro
 }
 
 
-bool producer_fill_facet(struct recombine2d_config *cfg,
+bool producer_fill_facet(struct work_config *wcfg,
                          struct facet_work *work,
                          double complex *F,
-                         int source_count, double *source_xy, double *source_corr,
-                         int x0_start, int x0_end) {
+                         int source_count, double *source_xy, double *source_lmn,
+                         double *source_corr,
+                         int x0_start, int x0_end, double w) {
 
+    struct recombine2d_config *cfg = &wcfg->recombine;
     int offset = sizeof(double complex) *x0_start * cfg->yB_size;
     int size = sizeof(double complex) *(x0_end - x0_start) * cfg->yB_size;
 
@@ -289,9 +297,16 @@ bool producer_fill_facet(struct recombine2d_config *cfg,
                 continue;
             }
 
+            // Calculate Fresnel pattern for w-stacking
+            complex double fresnel = 1;
+            if (w != 0) {
+                double ph = w * source_lmn[i*3+2];
+                fresnel = cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph);
+            }
+
             // Add source, with gridding correction applied
             F[(x0-x0_start)*cfg->F_stride0 + x1*cfg->F_stride1]
-                += 1 / source_corr[i];
+                += fresnel / source_corr[i];
         }
 
     } else {
@@ -310,22 +325,7 @@ bool producer_fill_facet(struct recombine2d_config *cfg,
 }
 
 // Gets subgrid offset for given column/rpw. Returns INT_MIN if no work was found.
-static int get_subgrid_off_u(struct work_config *wcfg, int iu)
-{
-
-    // Somewhat inefficiently walk entire work list
-    int iwork;
-    for (iwork = 0; iwork < wcfg->subgrid_workers * wcfg->subgrid_max_work; iwork++) {
-        if (wcfg->subgrid_work[iwork].nbl > 0 &&
-            wcfg->subgrid_work[iwork].iu == iu) break;
-    }
-    if (iwork >= wcfg->subgrid_workers * wcfg->subgrid_max_work)
-        return INT_MIN;
-
-    return wcfg->subgrid_work[iwork].subgrid_off_u;
-}
-
-static int get_subgrid_off_v(struct work_config *wcfg, int iu, int iv)
+static int get_subgrid_off_u(struct work_config *wcfg, int iu, int iw)
 {
 
     // Somewhat inefficiently walk entire work list
@@ -333,7 +333,24 @@ static int get_subgrid_off_v(struct work_config *wcfg, int iu, int iv)
     for (iwork = 0; iwork < wcfg->subgrid_workers * wcfg->subgrid_max_work; iwork++) {
         if (wcfg->subgrid_work[iwork].nbl > 0 &&
             wcfg->subgrid_work[iwork].iu == iu &&
-            wcfg->subgrid_work[iwork].iv == iv) break;
+            wcfg->subgrid_work[iwork].iw == iw) break;
+    }
+    if (iwork >= wcfg->subgrid_workers * wcfg->subgrid_max_work)
+        return INT_MIN;
+
+    return wcfg->subgrid_work[iwork].subgrid_off_u;
+}
+
+static int get_subgrid_off_v(struct work_config *wcfg, int iu, int iv, int iw)
+{
+
+    // Somewhat inefficiently walk entire work list
+    int iwork;
+    for (iwork = 0; iwork < wcfg->subgrid_workers * wcfg->subgrid_max_work; iwork++) {
+        if (wcfg->subgrid_work[iwork].nbl > 0 &&
+            wcfg->subgrid_work[iwork].iu == iu &&
+            wcfg->subgrid_work[iwork].iv == iv &&
+            wcfg->subgrid_work[iwork].iw == iw) break;
     }
     if (iwork >= wcfg->subgrid_workers * wcfg->subgrid_max_work) return INT_MIN;
 
@@ -345,7 +362,8 @@ static int get_subgrid_off_v(struct work_config *wcfg, int iu, int iv)
 static void producer_facets_work(struct work_config *wcfg,
                                  struct producer_stream *prod,
                                  struct producer_stream *producers,
-                                 double complex *F, double complex *BF)
+                                 double complex *F, double complex *BF,
+                                 int wlevel)
 {
 
     int ifacet;
@@ -364,7 +382,7 @@ static void producer_facets_work(struct work_config *wcfg,
         for (iu = wcfg->iu_min; iu <= wcfg->iu_max ; iu++) {
 
             // Determine column offset / check whether column actually has work
-            int subgrid_off_u = get_subgrid_off_u(wcfg, iu);
+            int subgrid_off_u = get_subgrid_off_u(wcfg, iu, wlevel);
             if (subgrid_off_u == INT_MIN) continue;
 
             // Loop through facets sequentially (inefficient, as it
@@ -380,10 +398,11 @@ static void producer_facets_work(struct work_config *wcfg,
                 // Go through rows in sequence
                 int iv;
                 for (iv = wcfg->iv_min; iv <= wcfg->iv_max; iv++) {
-                    int subgrid_off_v = get_subgrid_off_v(wcfg, iu, iv);
+                    int subgrid_off_v = get_subgrid_off_v(wcfg, iu, iv, wlevel);
                     if (subgrid_off_v == INT_MIN) continue;
                     producer_send_subgrid(wcfg, prod, ifacet, prod->worker.NMBF_BF,
-                                          subgrid_off_u, subgrid_off_v, iu, iv);
+                                          subgrid_off_u, subgrid_off_v, iu, iv,
+                                          wlevel);
                 }
             }
         }
@@ -392,7 +411,7 @@ static void producer_facets_work(struct work_config *wcfg,
         for (iu = wcfg->iu_min; iu <= wcfg->iu_max; iu++) {
 
             // Determine column offset / check whether column actually has work
-            int subgrid_off_u = get_subgrid_off_u(wcfg, iu);
+            int subgrid_off_u = get_subgrid_off_u(wcfg, iu, wlevel);
             if (subgrid_off_u == INT_MIN) continue;
 
             // Loop through facets (inefficient, see above)
@@ -416,10 +435,11 @@ static void producer_facets_work(struct work_config *wcfg,
                 int iv;
                 #pragma omp for schedule(dynamic)
                 for (iv = wcfg->iv_min; iv <= wcfg->iv_max; iv++) {
-                    int subgrid_off_v = get_subgrid_off_v(wcfg, iu, iv);
+                    int subgrid_off_v = get_subgrid_off_v(wcfg, iu, iv, wlevel);
                     if (subgrid_off_v == INT_MIN) continue;
                     producer_send_subgrid(wcfg, prod, ifacet, NMBF_BF,
-                                          subgrid_off_u, subgrid_off_v, iu, iv);
+                                          subgrid_off_u, subgrid_off_v, iu, iv,
+                                          wlevel);
                 }
             }
         }
@@ -432,49 +452,91 @@ double producer_work(struct work_config *wcfg,
                      double complex *F, double complex *BF)
 {
     struct recombine2d_config *const cfg = &wcfg->recombine;
-    struct producer_stream *prod = producers + omp_get_thread_num();
+    struct producer_stream *const prod = producers + omp_get_thread_num();
     struct facet_work *const fwork = wcfg->facet_work +
         prod->facet_worker * wcfg->facet_max_work;
 
-    // Start of facet data creation
-    double generate_start;
-    #pragma omp single copyprivate(generate_start)
-    {
-        printf("Filling %d facet%s...\n", facet_work_count, facet_work_count != 1 ? "s" : "");
-        generate_start = get_time_ns();
+    // Determine first and last needed w-level from subgrid work list
+    int min_wlevel = INT_MAX, max_wlevel = INT_MIN; int iwork;
+    for (iwork = 0; iwork < wcfg->subgrid_workers * wcfg->subgrid_max_work;
+         iwork++) {
+        if (!wcfg->subgrid_work[iwork].nbl)
+            continue;
+        if (min_wlevel > wcfg->subgrid_work[iwork].iw)
+            min_wlevel = wcfg->subgrid_work[iwork].iw;
+        if (max_wlevel < wcfg->subgrid_work[iwork].iw)
+            max_wlevel = wcfg->subgrid_work[iwork].iw;
     }
 
-    // Parallelise over facets and facet chunks
-    int ifacet; int x0; const int x0_chunk = 256;
-    #pragma omp for schedule(dynamic) collapse(2)
-    for (ifacet = 0; ifacet < facet_work_count; ifacet++) {
-        for (x0 = 0; x0 < cfg->yB_size; x0+=x0_chunk) {
-            int x0_end = x0 + x0_chunk;
-            if (x0_end > cfg->yB_size) x0_end = cfg->yB_size;
-            double complex *pF =
-                F + ifacet * wcfg->recombine.F_size / sizeof(*F)
-                + x0*cfg->F_stride0;
-            producer_fill_facet(cfg, fwork + ifacet, pF,
-                                wcfg->source_count, wcfg->source_xy,
-                                wcfg->source_corr,
-                                x0, x0_end);
+    int wlevel;
+    double stream_time;
+    for (wlevel = min_wlevel; wlevel <= max_wlevel; wlevel++) {
+
+        // Check whether wlevel should be skipped
+        bool found = false;
+        for (iwork = 0; iwork < wcfg->subgrid_workers * wcfg->subgrid_max_work;
+             iwork++) {
+            if (!wcfg->subgrid_work[iwork].nbl)
+                continue;
+            if (wcfg->subgrid_work[iwork].iw == wlevel) {
+                found = true;
+                break;
+            }
         }
+        if (!found)
+            continue;
+
+        // Start of facet data creation
+        double generate_start;
+        #pragma omp single copyprivate(generate_start)
+        {
+            printf("Filling %d facet%s (w level %d)...\n",
+                   facet_work_count, facet_work_count != 1 ? "s" : "",
+                   wlevel);
+            generate_start = get_time_ns();
+        }
+
+        // Parallelise over facets and facet chunks
+        int ifacet; int x0; const int x0_chunk = 256;
+        #pragma omp for schedule(dynamic) collapse(2)
+        for (ifacet = 0; ifacet < facet_work_count; ifacet++) {
+            for (x0 = 0; x0 < cfg->yB_size; x0+=x0_chunk) {
+                int x0_end = x0 + x0_chunk;
+                if (x0_end > cfg->yB_size) x0_end = cfg->yB_size;
+                double complex *pF =
+                    F + ifacet * wcfg->recombine.F_size / sizeof(*F)
+                    + x0*cfg->F_stride0;
+                memset(pF, 0, sizeof(*pF) * x0_chunk * cfg->F_stride0);
+
+                double w = wlevel * wcfg->wstep * wcfg->sg_step_w;
+                producer_fill_facet(wcfg, fwork + ifacet, pF,
+                                    wcfg->source_count, wcfg->source_xy,
+                                    wcfg->source_lmn, wcfg->source_corr,
+                                    x0, x0_end, w);
+            }
+        }
+
+        // Done creating facet data
+        double run_start;
+    #pragma omp single copyprivate(run_start)
+        {
+            printf(" %.2f s\n", get_time_ns() - generate_start);
+
+            run_start = get_time_ns();
+            printf("Streaming...\n");
+        }
+
+        // Start generating subgrid data
+        producer_facets_work(wcfg, prod, producers, F, BF, wlevel);
+
+#pragma omp single copyprivate(stream_time)
+        {
+            stream_time += get_time_ns() - run_start;
+        }
+
     }
 
-    // Done creating facet data
-    double run_start;
-#pragma omp single copyprivate(run_start)
-    {
-        printf(" %.2f s\n", get_time_ns() - generate_start);
-
-        run_start = get_time_ns();
-        printf("Streaming...\n");
-    }
-
-    // Start generating subgrid data
-    producer_facets_work(wcfg, prod, producers, F, BF);
-
-    return run_start;
+    return stream_time;
 }
 
 int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
@@ -515,7 +577,7 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
 
 
     // Global structures
-    double run_start;
+    double stream_time;
     int producer_count;
     struct producer_stream *producers;
 
@@ -548,7 +610,7 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
         }
 
         // Start creating facets and streaming subgrid data out
-        producer_work(wcfg, producers, facet_work_count, F, BF);
+        stream_time = producer_work(wcfg, producers, facet_work_count, F, BF);
 
 #ifndef NO_MPI
         // Wait for remaining packets to be sent
@@ -572,8 +634,7 @@ int producer(struct work_config *wcfg, int facet_worker, int *streamer_ranks)
         producer_add_stats(producers, producers + p);
     }
     producer_dump_stats(wcfg, facet_worker,
-                        producers, producer_count,
-                        get_time_ns() - run_start);
+                        producers, producer_count, stream_time);
 
     return 0;
 }
