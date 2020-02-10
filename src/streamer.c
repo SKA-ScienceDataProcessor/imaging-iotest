@@ -14,13 +14,19 @@
 
 #include <sys/mman.h>
 #include <sys/wait.h>
-#include <semaphore.h>
 
 #ifndef NO_MPI
 #include <mpi.h>
 #else
 #define MPI_Request int
 #define MPI_REQUEST_NULL 0
+#endif
+
+#ifndef __APPLE__
+#include <semaphore.h>
+#else
+#include <dispatch/dispatch.h>
+#define sem_t dispatch_semaphore_t
 #endif
 
 struct streamer_chunk
@@ -145,7 +151,11 @@ struct streamer_chunk *writer_push_slot(struct streamer_writer *writer,
     struct streamer_chunk *chunk = writer->queue + vis_slot;
 #pragma omp atomic
     writer->to_write += 1;
+#ifndef __APPLE__
     sem_wait(&chunk->in_lock);
+#else
+    dispatch_semaphore_wait(chunk->in_lock, DISPATCH_TIME_FOREVER);
+#endif
 
     // Set slot data
     chunk->a1 = a1;
@@ -400,7 +410,11 @@ void *streamer_writer_thread(void *param)
         // Obtain "out" lock for writing out visibilities
         double start = get_time_ns();
         struct streamer_chunk *chunk = writer->queue + writer->out_ptr;
+#ifndef __APPLE__
         sem_wait(&chunk->out_lock);
+#else
+        dispatch_semaphore_wait(chunk->out_lock, DISPATCH_TIME_FOREVER);
+#endif
         writer->wait_out_time += get_time_ns() - start;
 
         start = get_time_ns();
@@ -412,7 +426,11 @@ void *streamer_writer_thread(void *param)
         if (chunk->tchunk == -2 && chunk->fchunk == -2) {
             #pragma omp atomic
                 writer->to_write -= 1;
+#ifndef __APPLE__
             sem_post(&chunk->in_lock);
+#else
+            dispatch_semaphore_signal(chunk->in_lock);
+#endif
             writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
             continue; // Signal to ignore chunk
         }
@@ -481,7 +499,11 @@ void *streamer_writer_thread(void *param)
         // Release "in" lock to mark the slot free for writing
         #pragma omp atomic
             writer->to_write -= 1;
+#ifndef __APPLE__
         sem_post(&chunk->in_lock);
+#else
+        dispatch_semaphore_signal(chunk->in_lock);
+#endif
         writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
         writer->write_time += get_time_ns() - start;
 
@@ -738,7 +760,11 @@ bool streamer_degrid_chunk(struct streamer *streamer,
         }
 
         // Signal slot for output
+#ifndef __APPLE__
         sem_post(&chunk->out_lock);
+#else
+        dispatch_semaphore_signal(chunk->out_lock);
+#endif
     }
 
     return true;
@@ -1288,8 +1314,13 @@ bool streamer_init(struct streamer *streamer,
             writer->queue = streamer->vis_chunks + i * streamer->vis_queue_per_writer;
             int j;
             for (j = 0; j < streamer->vis_queue_per_writer; j++) {
+#ifndef __APPLE__
                 sem_init(&writer->queue[j].in_lock, wcfg->vis_fork_writer, 1);
                 sem_init(&writer->queue[j].out_lock, wcfg->vis_fork_writer, 0);
+#else
+                writer->queue[j].in_lock = dispatch_semaphore_create(1);
+                writer->queue[j].out_lock = dispatch_semaphore_create(0);
+#endif
                 writer->queue[j].vis = streamer->vis_queue +
                     spec->time_chunk * spec->freq_chunk * (i * streamer->vis_queue_per_writer + j);
             }
@@ -1331,7 +1362,7 @@ bool streamer_free(struct streamer *streamer,
 
     double stream_time = get_time_ns() - stream_start;
     printf("Streamed for %.2fs\n", stream_time);
-    printf("Received %.2f GB (%ld subgrids, %ld baselines)\n",
+    printf("Received %.2f GB (%llu subgrids, %llu baselines)\n",
            (double)streamer->received_data / 1000000000, streamer->received_subgrids,
            streamer->baselines_covered);
     printf("Receiver: Wait: %gs, Recombine: %gs, Idle: %gs\n",
@@ -1343,7 +1374,7 @@ bool streamer_free(struct streamer *streamer,
            streamer->num_workers * stream_time
            - streamer->wait_in_time - streamer->degrid_time
            - streamer->wait_time - streamer->recombine_time);
-    printf("Operations: degrid %.1f GFLOP/s (%ld chunks)\n",
+    printf("Operations: degrid %.1f GFLOP/s (%llu chunks)\n",
            (double)streamer->degrid_flops / stream_time / 1000000000,
            streamer->produced_chunks);
     if (streamer->vis_error_samples > 0) {
@@ -1353,10 +1384,10 @@ bool streamer_free(struct streamer *streamer,
         // Normalise by assuming that the energy of sources is
         // distributed evenly to all grid points
         const double source_energy = streamer->work_cfg->source_energy;
-        printf("Grid accuracy: RMSE %g, worst %g (%ld samples)\n",
+        printf("Grid accuracy: RMSE %g, worst %g (%llu samples)\n",
                grid_rmse / source_energy, streamer->grid_worst_error / source_energy,
                streamer->grid_error_samples);
-        printf("Vis accuracy: RMSE %g, worst %g (%ld samples)\n",
+        printf("Vis accuracy: RMSE %g, worst %g (%llu samples)\n",
                vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
                streamer->vis_error_samples);
         // Check against error bounds
@@ -1373,8 +1404,13 @@ bool streamer_free(struct streamer *streamer,
 
         int j;
         for (j = 0; j < streamer->vis_queue_per_writer; j++) {
+#ifndef __APPLE__
             sem_destroy(&writer->queue[j].in_lock);
             sem_destroy(&writer->queue[j].out_lock);
+#else
+            dispatch_release(writer->queue[i].in_lock);
+            dispatch_release(writer->queue[i].out_lock);
+#endif
         }
 
         // Then print stats. The above join can hang a bit as data
@@ -1453,7 +1489,11 @@ int streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
         int writer = 0;
         for (writer = 0; writer < streamer.writer_count; writer++) {
             struct streamer_chunk *slot = writer_push_slot(streamer.writer + writer, 0, 0, -1, -1);
+#ifndef __APPLE__
             sem_post(&slot->out_lock);
+#else
+            dispatch_semaphore_signal(slot->out_lock);
+#endif
         }
     }
 #pragma omp section

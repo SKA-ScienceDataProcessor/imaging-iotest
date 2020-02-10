@@ -1106,7 +1106,7 @@ bool create_bl_groups(hid_t vis_group, struct work_config *work_cfg, int worker)
         if (a1_g) H5Gclose(a1_g);
     }
 
-    printf("\ndone in %.2fs, %d groups for up to %ld visibilities (~%.3f GB) created\n",
+    printf("\ndone in %.2fs, %d groups for up to %llu visibilities (~%.3f GB) created\n",
            get_time_ns() -create_start, ncreated, nvis, 16. * nvis / 1000000000);
 
     return true;

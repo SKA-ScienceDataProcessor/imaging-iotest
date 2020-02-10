@@ -2,8 +2,12 @@
 HDF5_INC ?= /usr/include/hdf5/serial
 HDF5_LIB ?= /usr/lib/x86_64-linux-gnu/hdf5/serial
 
-CFLAGS += -Wall -fopenmp -ffast-math -I$(HDF5_INC) -ggdb -march=native -O2
-LDFLAGS += -fopenmp -ggdb -O2
+ifeq ($(shell uname -s),Darwin)
+  CFLAGS += -I"$(brew --prefix libomp)/include" -Xpreprocessor
+  LDFLAGS+= -L"$(brew --prefix libomp)/lib"
+endif
+CFLAGS += -fopenmp -Wall -ffast-math -I$(HDF5_INC) -ggdb -march=native -O2
+LDFLAGS += -ggdb -O2 -lomp
 LDLIBS = -L$(HDF5_LIB) -lm -lhdf5 -lfftw3
 CC = mpicc
 MPIRUN = mpirun

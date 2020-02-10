@@ -21,18 +21,6 @@
 // calculations and grids only into the middle.
 //#define ASSUME_UVW_0
 
-inline static int coord(int grid_size, double theta,
-                        struct bl_data *bl_data,
-                        int time, int freq) {
-#ifdef ASSUME_UVW_0
-    int x = 0, y = 0;
-#else
-    int x = (int)floor(theta * uvw_lambda(bl_data, time, freq, 0) + .5);
-    int y = (int)floor(theta * uvw_lambda(bl_data, time, freq, 1) + .5);
-#endif
-    return (y+grid_size/2) * grid_size + (x+grid_size/2);
-}
-
 inline static void _frac_coord(int grid_size, int oversample,
                                double u, int *x, int *fx) {
 
@@ -42,7 +30,8 @@ inline static void _frac_coord(int grid_size, int oversample,
     // approximation for "grid_size/2 + u".
     double o = (grid_size / 2 - u) * oversample;
 #ifdef __SSE4_1__
-    int ox = _mm_round_pd(_mm_set_pd(0, o),_MM_FROUND_TO_NEAREST_INT)[0];
+    __m128d oxd = _mm_round_pd(_mm_set_pd(0, o),_MM_FROUND_TO_NEAREST_INT);
+    int ox = oxd[0];
 #else
     fesetround(3); int ox = lrint(o);
 #endif

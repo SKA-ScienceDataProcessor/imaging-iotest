@@ -377,9 +377,9 @@ int load_vis(const char *filename, struct vis_data *vis,
 
     printf("\n");
     if (stats.vis_count < stats.total_vis_count) {
-        printf("Have %d baselines, %lu uvw positions, %lu visibilities\n", vis->bl_count, stats.vis_count, stats.total_vis_count);
+        printf("Have %d baselines, %llu uvw positions, %llu visibilities\n", vis->bl_count, stats.vis_count, stats.total_vis_count);
     } else {
-        printf("Have %d baselines and %lu visibilities\n", vis->bl_count, stats.vis_count);
+        printf("Have %d baselines and %llu visibilities\n", vis->bl_count, stats.vis_count);
     }
     printf("u range:     %.2f - %.2f lambda\n", stats.u_min*stats.f_max/c, stats.u_max*stats.f_max/c);
     printf("v range:     %.2f - %.2f lambda\n", stats.v_min*stats.f_max/c, stats.v_max*stats.f_max/c);
