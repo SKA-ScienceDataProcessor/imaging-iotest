@@ -110,6 +110,7 @@ struct work_config {
     int vis_check_existing;
     int vis_checks, grid_checks;
     double vis_max_error;
+    int vis_round_to_wplane;
 
     // Statsd connection
     int statsd_socket;

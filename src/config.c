@@ -659,6 +659,7 @@ void config_init(struct work_config *cfg)
     cfg->vis_checks = 16384;
     cfg->grid_checks = 4096;
     cfg->vis_max_error = 1;
+    cfg->vis_round_to_wplane = false;
 
     cfg->statsd_socket = -1;
     cfg->statsd_rate = 1;

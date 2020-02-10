@@ -559,7 +559,12 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
         double du = uvw_lambda(bl_data, time, 1, 0) - u;
         double dv = uvw_lambda(bl_data, time, 1, 1) - v;
         double dw = uvw_lambda(bl_data, time, 1, 2) - w;
-        //printf("w=%g dw=%g\n", w, dw);
+
+        // Round to w-plane? Useful for testing simple gridders
+        if (streamer->work_cfg->vis_round_to_wplane) {
+            w = mid_w; dw = 0;
+        }
+
         if (conjugate) {
             u *= -1; du *= -1; v *= -1; dv *= -1; w *= -1; dw *= -1;
         }
@@ -608,7 +613,7 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                 // Check error
                 square_error_samples += 1;
                 double err = cabs(vis_out - vis);
-                if (err > 1e-8 && false) {
+                if (err > 1e-7) {
                     fprintf(stderr,
                            "WARNING: uv %g/%g (sg %d/%d): %g%+gj != %g%+gj\n",
                            u, v, iu, iv, creal(vis_out), cimag(vis_out), creal(vis), cimag(vis));
@@ -954,6 +959,7 @@ void streamer_work(struct streamer *streamer,
 
     // Check against DFT, if we are generating from sources
     const int source_count = streamer->work_cfg->source_count;
+    double err_sum = 0, worst_err = 0; int err_samples = 0;
     int source_checks = streamer->work_cfg->grid_checks;
     if (source_count > 0 && source_checks > 0) {
 
@@ -961,7 +967,6 @@ void streamer_work(struct streamer *streamer,
         const double wstep = streamer->work_cfg->wstep;
 
         int iu, iv;
-        double err_sum = 0, worst_err = 0; int err_samples = 0;
         int check_counter = rand() % source_checks;
         for (iv = -cfg->xA_size/2; iv < cfg->xA_size/2; iv++) {
             for (iu = -cfg->xA_size/2; iu < cfg->xA_size/2; iu++) {
@@ -995,10 +1000,6 @@ void streamer_work(struct streamer *streamer,
             }
 
         }
-
-        const double source_energy = streamer->work_cfg->source_energy;
-        printf("%d/%d/%d rmse=%g\n", work->iu, work->iv, work->iw,
-               sqrt(err_sum / err_samples) / source_energy);
 
         #pragma omp atomic
              streamer->grid_error_samples += err_samples;
@@ -1043,8 +1044,14 @@ void streamer_work(struct streamer *streamer,
                 streamer->task_start_time += get_time_ns() - task_start;
         }
 
-        printf("Subgrid %d/%d/%d (%d baselines)\n",
-               work->iu, work->iv, work->iw, i_bl);
+        if (err_samples > 0) {
+            printf("Subgrid %d/%d/%d (%d baselines, rmse %.02g)\n",
+                   work->iu, work->iv, work->iw, i_bl,
+                   sqrt(err_sum / err_samples) / streamer->work_cfg->source_energy);
+        } else {
+            printf("Subgrid %d/%d/%d (%d baselines)\n",
+                   work->iu, work->iv, work->iw, i_bl);
+        }
         fflush(stdout);
         streamer->baselines_covered += i_bl;
 

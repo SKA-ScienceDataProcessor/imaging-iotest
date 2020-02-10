@@ -244,6 +244,7 @@ bool set_cmdarg_config(int argc, char **argv,
     // Read parameters
     config_init(cfg);
 
+    int vis_flatten=false;
     struct option options[] =
       {
         {"telescope",  required_argument, 0, Opt_telescope },
@@ -255,6 +256,7 @@ bool set_cmdarg_config(int argc, char **argv,
         {"grid-x0",    required_argument, 0, Opt_grid_x0 },
         {"grid-downsample", required_argument, 0, Opt_grid_downsample },
         {"vis-set",    required_argument, 0, Opt_vis_set},
+        {"vis-round-to-wplane",no_argument,&cfg->vis_round_to_wplane, true },
         {"add-meta",   no_argument,       &cfg->vis_skip_metadata, false },
         {"dump-baseline-bins", no_argument, &cfg->config_dump_baseline_bins, true },
         {"dump-subgrid-work", no_argument, &cfg->config_dump_subgrid_work, true },
