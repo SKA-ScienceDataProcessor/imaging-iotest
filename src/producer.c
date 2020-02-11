@@ -469,7 +469,7 @@ double producer_work(struct work_config *wcfg,
     }
 
     int wlevel;
-    double stream_time;
+    double stream_time = 0;
     for (wlevel = min_wlevel; wlevel <= max_wlevel; wlevel++) {
 
         // Check whether wlevel should be skipped

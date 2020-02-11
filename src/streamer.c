@@ -1369,7 +1369,7 @@ bool streamer_free(struct streamer *streamer,
 
     double stream_time = get_time_ns() - stream_start;
     printf("Streamed for %.2fs\n", stream_time);
-    printf("Received %.2f GB (%llu subgrids, %llu baselines)\n",
+    printf("Received %.2f GB (%"PRIu64" subgrids, %"PRIu64" baselines)\n",
            (double)streamer->received_data / 1000000000, streamer->received_subgrids,
            streamer->baselines_covered);
     printf("Receiver: Wait: %gs, Recombine: %gs, Idle: %gs\n",
@@ -1381,7 +1381,7 @@ bool streamer_free(struct streamer *streamer,
            streamer->num_workers * stream_time
            - streamer->wait_in_time - streamer->degrid_time
            - streamer->wait_time - streamer->recombine_time);
-    printf("Operations: degrid %.1f GFLOP/s (%llu chunks)\n",
+    printf("Operations: degrid %.1f GFLOP/s (%"PRIu64" chunks)\n",
            (double)streamer->degrid_flops / stream_time / 1000000000,
            streamer->produced_chunks);
     if (streamer->vis_error_samples > 0) {
@@ -1391,10 +1391,10 @@ bool streamer_free(struct streamer *streamer,
         // Normalise by assuming that the energy of sources is
         // distributed evenly to all grid points
         const double source_energy = streamer->work_cfg->source_energy;
-        printf("Grid accuracy: RMSE %g, worst %g (%llu samples)\n",
+        printf("Grid accuracy: RMSE %g, worst %g (%"PRIu64" samples)\n",
                grid_rmse / source_energy, streamer->grid_worst_error / source_energy,
                streamer->grid_error_samples);
-        printf("Vis accuracy: RMSE %g, worst %g (%llu samples)\n",
+        printf("Vis accuracy: RMSE %g, worst %g (%"PRIu64" samples)\n",
                vis_rmse / source_energy, streamer->vis_worst_error / source_energy,
                streamer->vis_error_samples);
         // Check against error bounds

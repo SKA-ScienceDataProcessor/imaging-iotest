@@ -650,7 +650,7 @@ void config_init(struct work_config *cfg)
     cfg->produce_queue_length = 4;
     cfg->vis_skip_metadata = true;
     cfg->vis_bls_per_task = 256;
-    cfg->vis_subgrid_queue_length = 4;
+    cfg->vis_subgrid_queue_length = 256;
     cfg->vis_task_queue_length = 96;
     cfg->vis_chunk_queue_length = 4096;
     cfg->vis_writer_count = 2;
@@ -1107,7 +1107,7 @@ bool create_bl_groups(hid_t vis_group, struct work_config *work_cfg, int worker)
         if (a1_g) H5Gclose(a1_g);
     }
 
-    printf("\ndone in %.2fs, %d groups for up to %llu visibilities (~%.3f GB) created\n",
+    printf("\ndone in %.2fs, %d groups for up to %"PRIu64" visibilities (~%.3f GB) created\n",
            get_time_ns() -create_start, ncreated, nvis, 16. * nvis / 1000000000);
 
     return true;

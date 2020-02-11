@@ -244,7 +244,6 @@ bool set_cmdarg_config(int argc, char **argv,
     // Read parameters
     config_init(cfg);
 
-    int vis_flatten=false;
     struct option options[] =
       {
         {"telescope",  required_argument, 0, Opt_telescope },
