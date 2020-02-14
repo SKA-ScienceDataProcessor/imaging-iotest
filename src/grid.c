@@ -158,14 +158,22 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
         if (v0+i0*dv > max_v) i0 = imax(i0, ceil( (max_v - v0) / dv ));
         if (v0+i1*dv < min_v) i1 = imin(i1, ceil( (min_v - v0) / dv ));
     }
+    if (dw > 0) {
+        if (w0+i0*dw < min_w) i0 = imax(i0, ceil( (min_w - w0) / dw ));
+        if (w0+i1*dw > max_w) i1 = imin(i1, ceil( (max_w - w0) / dw ));
+    } else if (dw < 0) {
+        if (w0+i0*dw > max_w) i0 = imax(i0, ceil( (max_w - w0) / dw ));
+        if (w0+i1*dw < min_w) i1 = imin(i1, ceil( (min_w - w0) / dw ));
+    }
     i0 = imax(0, imin(i0, i1));
 
     // Fill zeroes
     int i = 0; double complex *pvis = pvis0;
-    double u = u0, v = v0;
-    for (; i < i0; i++, u += du, v += dv, pvis++) {
-        //assert(!(u >= min_u && u < max_u &&
-        //         v >= min_v && v < max_v));
+    double u = u0, v = v0, w = w0;
+    for (; i < i0; i++, u += du, v += dv, w += dw, pvis++) {
+        /* assert(!( u >= min_u && u < max_u && */
+        /*           v >= min_v && v < max_v && */
+        /*           w >= min_w && w < max_w )); */
         *pvis = 0.;
     }
 
@@ -189,9 +197,10 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
         {
 
             double complex mult = (conjugate ? 1 - I : 1 + I);
-            for (; i < i1; i++, u += du, v += dv, pvis+=1) {
+            for (; i < i1; i++, u += du, v += dv, w += dw, pvis+=1) {
                 assert(u >= min_u && u < max_u &&
-                       v >= min_v && v < max_v);
+                       v >= min_v && v < max_v &&
+                       w >= min_w && w < max_w);
                 degrid_conv_uv(uvgrid, grid_size, grid_stride, theta,
                                mult, u, v, kernel, flops, pvis);
             }
@@ -200,9 +209,10 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
     }
 
     // Fill remaining zeroes
-    for (; i < count; i++, u += du, v += dv, pvis++) {
-        //assert(!(u >= min_u && u < max_u &&
-        //       v >= min_v && v < max_v));
+    for (; i < count; i++, u += du, v += dv, w += dw, pvis++) {
+        /* assert(!( u >= min_u && u < max_u && */
+        /*           v >= min_v && v < max_v && */
+        /*           w >= min_w && w < max_w )); */
         *pvis = 0.;
     }
 
