@@ -22,31 +22,20 @@ double get_time_ns()
     return ts.tv_sec + (double)ts.tv_nsec / 1000000000;
 }
 
-void bl_bounding_box(struct vis_spec *spec,
-                     int a1, int a2,
+void bl_bounding_box(struct bl_data *bl_data, bool negate,
                      int tstep0, int tstep1,
                      int fstep0, int fstep1,
                      double *uvw_l_min, double *uvw_l_max)
 {
-    struct ant_config *cfg = spec->cfg;
 
     // Check time start and end (TODO - that's simplifying quite a bit)
-    double uvw0[3], uvw1[3];
-    ha_to_uvw_sc(cfg, a1, a2,
-                 spec->ha_sin[tstep0], spec->ha_cos[tstep0],
-                 spec->dec_sin, spec->dec_cos,
-                 uvw0);
-    ha_to_uvw_sc(cfg, a1, a2,
-                 spec->ha_sin[tstep1], spec->ha_cos[tstep1],
-                 spec->dec_sin, spec->dec_cos,
-                 uvw1);
+    double *uvw0 = bl_data->uvw_m + tstep0 * 3;
+    double *uvw1 = bl_data->uvw_m + tstep1 * 3;
 
     // Conversion factor to uvw in lambda
-    double f0, f1;
-    f0 = spec->freq_start + spec->freq_step * fstep0;
-    f1 = spec->freq_start + spec->freq_step * fstep1;
-    double scale0 = uvw_m_to_l(1, f0),
-           scale1 = uvw_m_to_l(1, f1);
+    double scale0 = uvw_m_to_l(1, bl_data->freq[fstep0]),
+           scale1 = uvw_m_to_l(1, bl_data->freq[fstep1]);
+    if (negate) { scale0 = -scale0; scale1 = -scale1; }
 
     // Determine bounding box
     int i = 0;
@@ -58,14 +47,14 @@ void bl_bounding_box(struct vis_spec *spec,
     }
 }
 
-void bl_bounding_subgrids(struct vis_spec *spec,
+void bl_bounding_subgrids(struct bl_data *bl_data, bool negate,
                           double lam_sg, double wstep_sg, int a1, int a2,
                           int *sg_min, int *sg_max)
 {
     double uvw_l_min[3], uvw_l_max[3];
-    bl_bounding_box(spec, a1, a2,
-                    0, spec->time_count-1,
-                    0, spec->freq_count-1,
+    bl_bounding_box(bl_data, negate,
+                    0, bl_data->time_count-1,
+                    0, bl_data->freq_count-1,
                     uvw_l_min, uvw_l_max);
 
     // Convert into subgrid indices
@@ -96,10 +85,11 @@ static int compare_prio_nbl(const void *_w1, const void *_w2)
     return w1->nbl > w2->nbl;
 }
 
-static int bin_baseline(struct vis_spec *spec,
+static int bin_baseline(struct vis_spec *spec, struct bl_data *bl_data,
                         double lam_sg, double wstep_sg,
                         int nsubgrid, int nwlevels,
-                        int a1, int a2, int iu, int iv, int iw)
+                        int a1, int a2, int iu, int iv, int iw,
+                        double *pmin_w)
 {
     assert (iu >= 0 && iu < nsubgrid);
     assert (iv >= 0 && iv < nsubgrid);
@@ -113,6 +103,7 @@ static int bin_baseline(struct vis_spec *spec,
     double sg_max_w = wstep_sg*(iw-nwlevels/2) + wstep_sg/2;
     int ntchunk = spec_time_chunks(spec);
     int nfchunk = spec_freq_chunks(spec);
+    double min_w = sg_max_w;
 
     // Count number of overlapping chunks
     for (tchunk = 0; tchunk < ntchunk; tchunk++) {
@@ -123,12 +114,7 @@ static int bin_baseline(struct vis_spec *spec,
         // never big enough that we would overlap an extra subgrid
         // into the negative direction.
         int tstep_mid = tchunk * spec->time_chunk + spec->time_chunk / 2;
-        double uvw_mid[3];
-        ha_to_uvw_sc(spec->cfg, a1, a2,
-                     spec->ha_sin[tstep_mid], spec->ha_cos[tstep_mid],
-                     spec->dec_sin, spec->dec_cos,
-                     uvw_mid);
-        bool positive_u = uvw_mid[0] >= 0;
+        bool positive_u = bl_data->uvw_m[tstep_mid * 3] >= 0;
 
         // Check frequencies. We adjust step length exponentially so
         // we can jump over non-matching space quicker, see
@@ -139,22 +125,12 @@ static int bin_baseline(struct vis_spec *spec,
 
             // Determine chunk bounding box
             double uvw_l_min[3], uvw_l_max[3];
-            bl_bounding_box(spec, a1, a2,
+            bl_bounding_box(bl_data, !positive_u,
                             tchunk * spec->time_chunk,
                             fmin(spec->time_count, (tchunk+1) * spec->time_chunk) - 1,
                             fchunk * spec->freq_chunk,
                             fmin(spec->freq_count, (fchunk+fstep) * spec->freq_chunk) - 1,
                             uvw_l_min, uvw_l_max);
-
-            // Chunk is at negative coordinates?
-            if (!positive_u) {
-                int i;
-                for (i = 0; i < 3; i++) {
-                    double swap = uvw_l_min[i];
-                    uvw_l_min[i] = -uvw_l_max[i];
-                    uvw_l_max[i] = -swap;
-                }
-            }
 
             if (uvw_l_min[0] < sg_max_u && uvw_l_max[0] > sg_min_u &&
                 uvw_l_min[1] < sg_max_v && uvw_l_max[1] > sg_min_v &&
@@ -163,6 +139,7 @@ static int bin_baseline(struct vis_spec *spec,
                 if (fstep == 1) {
                     // Found a chunk
                     chunks++;
+                    min_w = fmin(min_w, uvw_l_min[2]);
                 } else {
                     // Went too fast. Decrease step length, recheck.
                     fstep /= 2;
@@ -176,6 +153,7 @@ static int bin_baseline(struct vis_spec *spec,
         }
     }
 
+    if (pmin_w) *pmin_w = min_w;
     return chunks;
 }
 
@@ -184,7 +162,7 @@ static int max(int a, int b) { return a < b ? b : a; }
 
 
 // Collect work for a specific subgrid cube
-static void collect_work(struct vis_spec *spec,
+static void collect_work(struct vis_spec *spec, struct bl_data *bl_data,
                          double lam_sg, double wstep_sg,
                          int nsubgrid, int nwlevels,
                          int *sg_mins, int *sg_maxs,
@@ -207,9 +185,12 @@ static void collect_work(struct vis_spec *spec,
                 continue;
 
             // Count actual number of chunks
-            int chunks = bin_baseline(spec, lam_sg, wstep_sg,
+            double min_w; // lowest w-level touched by a chunk
+            struct bl_data *bl_data_bl = bl_data + spec->cfg->ant_count*a2+a1;
+            int chunks = bin_baseline(spec, bl_data_bl,
+                                      lam_sg, wstep_sg,
                                       nsubgrid, nwlevels,
-                                      a1, a2, iu, iv, iw);
+                                      a1, a2, iu, iv, iw, &min_w);
             if (!chunks)
                 continue;
 
@@ -219,18 +200,31 @@ static void collect_work(struct vis_spec *spec,
             // Make sure we don't add a baseline twice
             assert(!*work || (*work)->a1 != a1 || (*work)->a2 != a2);
 
+            // Find baseline insert position (sort by w so that we
+            // maximise locality and minimise redundant w-tower FFTs
+            // down the line)
+            struct subgrid_work_bl *pos = *work, *prev = NULL;
+            while (pos && pos->min_w < min_w) {
+                prev = pos; pos = pos->next;
+            }
+
             // Add work structure
             struct subgrid_work_bl *wbl = (struct subgrid_work_bl *)
                 malloc(sizeof(struct subgrid_work_bl));
             wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
-            wbl->next = *work;
-            wbl->sg_min_u = sg_min[0];
-            wbl->sg_min_v = sg_min[1];
-            wbl->sg_min_w = sg_min[2];
-            wbl->sg_max_u = sg_max[0];
-            wbl->sg_max_v = sg_max[1];
-            wbl->sg_max_w = sg_max[2];
-            *work = wbl;
+            wbl->next = pos;
+            wbl->min_w = min_w;
+            /* wbl->sg_min_u = sg_min[0]; */
+            /* wbl->sg_min_v = sg_min[1]; */
+            /* wbl->sg_min_w = sg_min[2]; */
+            /* wbl->sg_max_u = sg_max[0]; */
+            /* wbl->sg_max_v = sg_max[1]; */
+            /* wbl->sg_max_w = sg_max[2]; */
+            wbl->bl_data = bl_data_bl;
+            if (prev)
+                prev->next = wbl;
+            else
+                *work = wbl;
             fflush(stdout);
 
 
@@ -240,11 +234,11 @@ static void collect_work(struct vis_spec *spec,
 }
 
 // Bin baselines per overlapping subgrid
-static void collect_baselines(struct vis_spec *spec,
-                             double lam, double lam_sg, double wstep_sg,
-                             bool dump_baselines,
-                             int **pnchunks, struct subgrid_work_bl ***pbls,
-                             int *pnsubgrid, int *pnwlevels)
+static void collect_baselines(struct vis_spec *spec, struct bl_data *bl_data,
+                              double lam, double lam_sg, double wstep_sg,
+                              bool dump_baselines,
+                              int **pnchunks, struct subgrid_work_bl ***pbls,
+                              int *pnsubgrid, int *pnwlevels)
 {
 
     // Determine baseline bounding boxes
@@ -253,11 +247,13 @@ static void collect_baselines(struct vis_spec *spec,
         *sg_maxs = (int *)malloc(sizeof(int) * 3 * nbl_total);
     int a1, a2, bl = 0;
     int max_sg_u = 0, max_sg_v = 0, max_sg_w = 0;
-    for (a1 = 0; a1 < spec->cfg->ant_count; a1++) {
-        for (a2 = a1+1; a2 < spec->cfg->ant_count; a2++, bl++) {
+    const int nant = spec->cfg->ant_count;
+    for (a1 = 0; a1 < nant; a1++) {
+        for (a2 = a1+1; a2 < nant; a2++, bl++) {
             int *mins = sg_mins + bl * 3,
                 *maxs = sg_maxs + bl * 3;
-            bl_bounding_subgrids(spec, lam_sg, wstep_sg, a1, a2,
+            bl_bounding_subgrids(bl_data + a1 + nant*a2, false,
+                                 lam_sg, wstep_sg, a1, a2,
                                  mins, maxs);
             max_sg_u = max(max_sg_u, max(-mins[0], maxs[0]));
             max_sg_v = max(max_sg_v, max(-mins[1], maxs[1]));
@@ -285,7 +281,8 @@ static void collect_baselines(struct vis_spec *spec,
         for (iu = 0; iu < nsubgrid; iu++) {
             for (iw = 0; iw < nwlevels; iw++) {
                 int ix = iw * nsubgrid*nsubgrid + iv * nsubgrid + iu;
-                collect_work(spec, lam_sg, wstep_sg, nsubgrid, nwlevels,
+                collect_work(spec, bl_data,
+                             lam_sg, wstep_sg, nsubgrid, nwlevels,
                              sg_mins, sg_maxs, iu, iv, iw,
                              nchunks + ix, bls + ix);
             }
@@ -301,8 +298,10 @@ static void collect_baselines(struct vis_spec *spec,
             for (iu = nsubgrid/2; iu < nsubgrid; iu++) {
                 for (iw = 0; iw < nwlevels; iw++) {
                     int chunks = 0; struct subgrid_work_bl *bl;
-                    for (bl = bls[nsubgrid*nsubgrid*iw+nsubgrid*iv+iu]; bl; bl=bl->next) {
+                    for (bl = bls[nsubgrid*nsubgrid*iw+nsubgrid*iv+iu];
+                         bl; bl=bl->next) {
                         chunks += bl->chunks;
+                        printf("%g ", bl->min_w);
                     }
                     if (chunks) {
                         printf("%d,%d,%d,%d\n", iu, iv, iw, chunks);
@@ -353,7 +352,7 @@ static bool generate_subgrid_work_assignment(struct work_config *cfg)
     double start = get_time_ns();
     const double lam = config_lambda(cfg);
     int nsubgrid, nwlevels;
-    collect_baselines(spec, lam,
+    collect_baselines(spec, cfg->bl_data, lam,
                       cfg->sg_step / cfg->theta,
                       cfg->sg_step_w * cfg->wstep,
                       cfg->config_dump_baseline_bins,
@@ -722,6 +721,36 @@ void config_free(struct work_config *cfg)
     cfg->statsd_socket = -1;
 }
 
+// Make baseline specification. Right now this is the same for every
+// baseline, but this will change for baseline dependent averaging.
+void vis_spec_to_bl_data(struct bl_data *bl, struct vis_spec *spec,
+                         int a1, int a2)
+{
+    int i;
+
+    // Create baseline structure
+    bl->time_count = spec->time_count;
+    bl->time = (double *)malloc(sizeof(double) * spec->time_count);
+    for (i = 0; i < spec->time_count; i++) {
+        bl->time[i] = spec->time_start + spec->time_step * i;
+    }
+    bl->uvw_m = (double *)malloc(sizeof(double) * spec->time_count * 3);
+    for (i = 0; i < spec->time_count; i++) {
+        ha_to_uvw_sc(spec->cfg, a1, a2,
+                     spec->ha_sin[i], spec->ha_cos[i],
+                     spec->dec_sin, spec->dec_cos,
+                     bl->uvw_m + i*3);
+    }
+    bl->freq_count = spec->freq_count;
+    bl->freq = (double *)malloc(sizeof(double) * spec->freq_count);
+    for (i = 0; i < spec->freq_count; i++) {
+        bl->freq[i] = spec->freq_start + spec->freq_step * i;
+    }
+    bl->antenna1 = a1;
+    bl->antenna2 = a2;
+
+}
+
 void config_set_visibilities(struct work_config *cfg,
                              struct vis_spec *spec,
                              const char *vis_path)
@@ -755,6 +784,18 @@ void config_set_visibilities(struct work_config *cfg,
     }
     cfg->spec.dec_sin = sin(cfg->spec.dec);
     cfg->spec.dec_cos = cos(cfg->spec.dec);
+
+    // Calculate baseline data (UVWs)
+    printf("Calculating UVW...\n");
+    const int nant = spec->cfg->ant_count;
+    cfg->bl_data = (struct bl_data *)calloc(sizeof(struct bl_data), nant * nant);
+    int a1, a2;
+    for (a1 = 0; a1 < nant; a1++) {
+        for (a2 = a1+1; a2 < nant; a2++) {
+            vis_spec_to_bl_data(cfg->bl_data + a1 + nant*a2, &cfg->spec, a1, a2);
+        }
+    }
+
 }
 
 bool config_set_degrid(struct work_config *cfg, const char *gridder_path,
@@ -995,36 +1036,6 @@ void config_set_sources(struct work_config *cfg, int count, unsigned int seed)
             cfg->source_corr[i] = 1;
         }
     }
-
-}
-
-// Make baseline specification. Right now this is the same for every
-// baseline, but this will change for baseline dependent averaging.
-void vis_spec_to_bl_data(struct bl_data *bl, struct vis_spec *spec,
-                         int a1, int a2)
-{
-    int i;
-
-    // Create baseline structure
-    bl->time_count = spec->time_count;
-    bl->time = (double *)malloc(sizeof(double) * spec->time_count);
-    for (i = 0; i < spec->time_count; i++) {
-        bl->time[i] = spec->time_start + spec->time_step * i;
-    }
-    bl->uvw_m = (double *)malloc(sizeof(double) * spec->time_count * 3);
-    for (i = 0; i < spec->time_count; i++) {
-        ha_to_uvw_sc(spec->cfg, a1, a2,
-                     spec->ha_sin[i], spec->ha_cos[i],
-                     spec->dec_sin, spec->dec_cos,
-                     bl->uvw_m + i*3);
-    }
-    bl->freq_count = spec->freq_count;
-    bl->freq = (double *)malloc(sizeof(double) * spec->freq_count);
-    for (i = 0; i < spec->freq_count; i++) {
-        bl->freq[i] = spec->freq_start + spec->freq_step * i;
-    }
-    bl->antenna1 = a1;
-    bl->antenna2 = a2;
 
 }
 

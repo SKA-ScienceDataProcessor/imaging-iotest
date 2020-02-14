@@ -20,17 +20,6 @@ struct bl_data
     double *freq; // [freq_count], in Hz
     double *uvw_m; // [time_count], in m
     double complex *vis; // [time_count, freq_count]
-
-    // temporary from here
-
-    double complex *awkern;
-    double u_min, u_max; // in m
-    double v_min, v_max; // in m
-    double w_min, w_max; // in m
-    double t_min, t_max; // in h
-    double f_min, f_max; // in Hz
-
-    uint64_t flops;
 };
 struct vis_data
 {
@@ -143,8 +132,8 @@ int load_sep_kern(const char *filename, struct sep_kernel_data *sepkern, bool lo
 void frac_coord(int grid_size, int oversample,
                 double u, int *x, int *fx);
 void degrid_conv_uv_pf(double complex *uvgrid, int grid_size, int grid_stride, double theta,
-		       double u, double v,
-		       struct sep_kernel_data *kernel);
+                       double u, double v,
+                       struct sep_kernel_data *kernel);
 void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
                          double theta, double u0, double v0, double w0,
                          double du, double dv, double dw, int count,

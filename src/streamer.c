@@ -31,7 +31,8 @@
 
 struct streamer_chunk
 {
-    int a1, a2, tchunk, fchunk;
+    struct bl_data *bl_data;
+    int tchunk, fchunk;
     sem_t in_lock, out_lock; // Ready to fill / write to disk
     double complex *vis;
 };
@@ -133,7 +134,8 @@ static double complex *subgrid_slot(struct streamer *streamer, int slot)
 }
 
 struct streamer_chunk *writer_push_slot(struct streamer_writer *writer,
-                                        int a1, int a2, int tchunk, int fchunk)
+                                        struct bl_data *bl_data,
+                                        int tchunk, int fchunk)
 {
     if (!writer) return NULL;
 
@@ -158,8 +160,7 @@ struct streamer_chunk *writer_push_slot(struct streamer_writer *writer,
 #endif
 
     // Set slot data
-    chunk->a1 = a1;
-    chunk->a2 = a2;
+    chunk->bl_data = bl_data;
     chunk->tchunk = tchunk;
     chunk->fchunk = fchunk;
     return chunk;
@@ -420,7 +421,6 @@ void *streamer_writer_thread(void *param)
         start = get_time_ns();
 
         // Obtain baseline data
-        struct bl_data bl_data;
         if (chunk->tchunk == -1 && chunk->fchunk == -1)
             break; // Signal to end thread
         if (chunk->tchunk == -2 && chunk->fchunk == -2) {
@@ -434,15 +434,16 @@ void *streamer_writer_thread(void *param)
             writer->out_ptr = (writer->out_ptr + 1) % writer->queue_length;
             continue; // Signal to ignore chunk
         }
-        vis_spec_to_bl_data(&bl_data, spec, chunk->a1, chunk->a2);
+        const int nant =  wcfg->spec.cfg->ant_count;
+        struct bl_data *bl_data = chunk->bl_data;
         double complex *vis_data = chunk->vis;
 
         // Read visibility chunk. If it was not yet set, this will
         // just fill the buffer with zeroes.
-        int chunk_index = ((bl_data.antenna2 * spec->cfg->ant_count + bl_data.antenna1)
+        int chunk_index = ((bl_data->antenna2 * nant + bl_data->antenna1)
                            * time_chunk_count + chunk->tchunk) * freq_chunk_count + chunk->fchunk;
         if (wcfg->vis_check_existing || chunks_written[chunk_index]) {
-            read_vis_chunk(writer->group, &bl_data,
+            read_vis_chunk(writer->group, bl_data,
                            spec->time_chunk, spec->freq_chunk,
                            chunk->tchunk, chunk->fchunk,
                            vis_data_h5);
@@ -482,7 +483,7 @@ void *streamer_writer_thread(void *param)
             }
 
             // Write chunk back
-            write_vis_chunk(writer->group, &bl_data,
+            write_vis_chunk(writer->group, bl_data,
                             spec->time_chunk, spec->freq_chunk,
                             chunk->tchunk, chunk->fchunk,
                             vis_data_h5);
@@ -493,8 +494,6 @@ void *streamer_writer_thread(void *param)
             chunks_written[chunk_index] = true;
 
         }
-
-        free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
 
         // Release "in" lock to mark the slot free for writing
         #pragma omp atomic
@@ -647,7 +646,6 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
 bool streamer_degrid_chunk(struct streamer *streamer,
                            struct subgrid_work *work,
                            struct subgrid_work_bl *bl,
-                           struct bl_data *bl_data,
                            int tchunk, int fchunk,
                            int slot,
                            int SG_stride, double complex *subgrid)
@@ -686,43 +684,21 @@ bool streamer_degrid_chunk(struct streamer *streamer,
         if1 = (fchunk+1) * spec->freq_chunk;
     if (if1 > spec->freq_count) if1 = spec->freq_count;
 
-    // Check whether we actually have overlap with the subgrid (TODO:
-    // again slightly naive, there's a chance we lose some
-    // visibilities here)
-    double f0 = uvw_m_to_l(1, bl_data->freq[if0]);
-    double f1 = uvw_m_to_l(1, bl_data->freq[if1-1]);
-    double *uvw0 = bl_data->uvw_m + 3*it0;
-    double *uvw1 = bl_data->uvw_m + 3*(it1-1);
-    double min_u = fmin(fmin(uvw0[0]*f0, uvw0[0]*f1), fmin(uvw1[0]*f0, uvw1[0]*f1));
-    double min_v = fmin(fmin(uvw0[1]*f0, uvw0[1]*f1), fmin(uvw1[1]*f0, uvw1[1]*f1));
-    double min_w = fmin(fmin(uvw0[2]*f0, uvw0[2]*f1), fmin(uvw1[2]*f0, uvw1[2]*f1));
-    double max_u = fmax(fmax(uvw0[0]*f0, uvw0[0]*f1), fmax(uvw1[0]*f0, uvw1[0]*f1));
-    double max_v = fmax(fmax(uvw0[1]*f0, uvw0[1]*f1), fmax(uvw1[1]*f0, uvw1[1]*f1));
-    double max_w = fmax(fmax(uvw0[2]*f0, uvw0[2]*f1), fmax(uvw1[2]*f0, uvw1[2]*f1));
-
     // Check whether time chunk fall into positive u. We use this
     // for deciding whether coordinates are going to get flipped
     // for the entire chunk. This is assuming that a chunk is
     // never big enough that we would overlap an extra subgrid
     // into the negative direction.
     int tstep_mid = (it0 + it1) / 2;
-    double uvw_mid[3];
-    ha_to_uvw_sc(spec->cfg, bl->a1, bl->a2,
-                 spec->ha_sin[tstep_mid], spec->ha_cos[tstep_mid],
-                 spec->dec_sin, spec->dec_cos,
-                 uvw_mid);
-    bool positive_u = uvw_mid[0] >= 0;
-    if (!positive_u) {
-        double swap;
-        swap = min_u; min_u = -max_u; max_u = -swap;
-        swap = min_v; min_v = -max_v; max_v = -swap;
-        swap = min_w; min_w = -max_w; max_w = -swap;
-    }
+    bool positive_u = bl->bl_data->uvw_m[tstep_mid * 3] >= 0;
 
     // Check for overlap between baseline chunk and subgrid
-    if (!(min_u < sg_max_u && max_u > sg_min_u &&
-          min_v < sg_max_v && max_v > sg_min_v &&
-          min_w < sg_max_w && max_w > sg_min_w))
+    double min_uvw[3], max_uvw[3];
+    bl_bounding_box(bl->bl_data, !positive_u, it0, it1-1, if0, if1-1,
+                    min_uvw, max_uvw);
+    if (!(min_uvw[0] < sg_max_u && max_uvw[0] > sg_min_u &&
+          min_uvw[1] < sg_max_v && max_uvw[1] > sg_min_v &&
+          min_uvw[2] < sg_max_w && max_uvw[2] > sg_min_w))
         return false;
 
     // Determine least busy writer
@@ -737,7 +713,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
 
     // Acquire a slot
     struct streamer_chunk *chunk
-        = writer_push_slot(writer, bl->a1, bl->a2, tchunk, fchunk);
+        = writer_push_slot(writer, bl->bl_data, tchunk, fchunk);
     #pragma omp atomic
         streamer->wait_in_time += get_time_ns() - start;
     start = get_time_ns();
@@ -745,7 +721,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     // Do degridding
     const size_t chunk_vis_size = sizeof(double complex) * spec->freq_chunk * spec->time_chunk;
     uint64_t flops = streamer_degrid_worker(
-        streamer, bl_data, SG_stride, subgrid,
+        streamer, bl->bl_data, SG_stride, subgrid,
         sg_mid_u, sg_mid_v, sg_mid_w,
         work->iu, work->iv, work->iw,
         !positive_u,
@@ -807,19 +783,15 @@ void streamer_task(struct streamer *streamer,
          bl2 && i_bl2 < streamer->work_cfg->vis_bls_per_task;
          bl2 = bl2->next, i_bl2++) {
 
-        // Get baseline data
-        struct bl_data bl_data;
-        vis_spec_to_bl_data(&bl_data, spec, bl2->a1, bl2->a2);
-
         // Go through time/frequency chunks
-        int ntchunk = (bl_data.time_count + spec->time_chunk - 1) / spec->time_chunk;
-        int nfchunk = (bl_data.freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
+        int ntchunk = (bl->bl_data->time_count + spec->time_chunk - 1) / spec->time_chunk;
+        int nfchunk = (bl->bl_data->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
         int tchunk, fchunk;
         int nchunks = 0;
         for (tchunk = 0; tchunk < ntchunk; tchunk++)
             for (fchunk = 0; fchunk < nfchunk; fchunk++)
                 if (streamer_degrid_chunk(streamer, work,
-                                          bl2, &bl_data, tchunk, fchunk,
+                                          bl2, tchunk, fchunk,
                                           slot, SG_stride, subgrid2))
                     nchunks++;
 
@@ -832,7 +804,6 @@ void streamer_task(struct streamer *streamer,
             printf("WARNING: subgrid (%d/%d/%d) baseline (%d-%d) %d chunks planned, %d actual!\n",
                    work->iu, work->iv, work->iw, bl2->a1, bl2->a2, bl2->chunks, nchunks);
 
-        free(bl_data.time); free(bl_data.uvw_m); free(bl_data.freq);
     }
 
     // Done with this chunk
@@ -1495,7 +1466,8 @@ int streamer(struct work_config *wcfg, int subgrid_worker, int *producer_ranks)
         streamer.finished = true;
         int writer = 0;
         for (writer = 0; writer < streamer.writer_count; writer++) {
-            struct streamer_chunk *slot = writer_push_slot(streamer.writer + writer, 0, 0, -1, -1);
+            struct streamer_chunk *slot = writer_push_slot(
+                 streamer.writer + writer, NULL, -1, -1);
 #ifndef __APPLE__
             sem_post(&slot->out_lock);
 #else

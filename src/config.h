@@ -24,8 +24,7 @@ inline static int spec_freq_chunks(struct vis_spec *spec) {
     return (spec->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
 }
 
-void bl_bounding_box(struct vis_spec *spec,
-                     int a1, int a2,
+void bl_bounding_box(struct bl_data *bl_data, bool negate,
                      int tstep0, int tstep1,
                      int fstep0, int fstep1,
                      double *uvw_l_min, double *uvw_l_max);
@@ -44,9 +43,8 @@ struct subgrid_work_bl
 {
     int a1, a2; // Baseline antennas
     int chunks; // Number of (time,frequency) chunks overlapping
-    int sg_min_u, sg_max_u,
-        sg_min_v, sg_max_v,
-        sg_min_w, sg_max_w; // Subgrid bounds of baseline
+    double min_w; // Minimum touched w-level (for sorting)
+    struct bl_data *bl_data;
     struct subgrid_work_bl *next;
 };
 
@@ -69,7 +67,8 @@ struct work_config {
     double theta; // size of (padded) image in radians (1/uvstep)
     double wstep; // distance of w-planes
     int sg_step, sg_step_w; // effective subgrid cube size (step length as above)
-    struct vis_spec spec;
+    struct vis_spec spec; // Visibility specification
+    struct bl_data *bl_data; // Baseline data (e.g. UVWs)
     char *vis_path; // Visibility file (pattern)
     struct sep_kernel_data gridder, w_gridder; // uv/w gridder
 
