@@ -16,9 +16,10 @@ MPIRUN = mpirun
 
 GRID_FILES = grid_avx2_16.c grid_avx2_14.c grid_avx2_12.c grid_avx2_10.c grid_avx2_8.c
 
-IOTEST_OBJS = iotest.o recombine.o hdf5.o config.o producer.o streamer.o grid.o
+IOTEST_OBJS = iotest.o recombine.o hdf5.o config.o producer.o \
+	streamer.o streamer_work.o grid.o
 TEST_RECOMBINE_OBJS = recombine.o test_recombine.o grid.o hdf5.o
-TEST_CONFIG_OBJS = test_config.o config.o recombine.o  hdf5.o
+TEST_CONFIG_OBJS = test_config.o config.o recombine.o hdf5.o
 
 iotest : $(IOTEST_OBJS)
 test_recombine : $(TEST_RECOMBINE_OBJS)
