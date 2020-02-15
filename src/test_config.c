@@ -66,7 +66,7 @@ void simple_benchmark(const char *filename,
                 for (ifreq = 0; ifreq < nfchunk; ifreq++) {
 
                     double uvw_l_min[3], uvw_l_max[3];
-                    bl_bounding_box(spec, wbl->a1, wbl->a2,
+                    bl_bounding_box(&bl, false,
                                     itime * spec->time_chunk,
                                     fmax(spec->time_count, (itime+1) * spec->time_chunk) - 1,
                                     ifreq * spec->freq_chunk,
@@ -154,7 +154,7 @@ int main(int argc, char *argv[])
     spec.freq_chunk = 64;
     spec.freq_step = 75.e6 / spec.freq_count; // Hz
 
-    config_set_visibilities(&work_cfg, &spec, spec.fov / 2 / 0.4, NULL);
+    config_set_visibilities(&work_cfg, &spec, NULL);
     config_assign_work(&work_cfg, 9, subgrid_workers);
 
     int i;
