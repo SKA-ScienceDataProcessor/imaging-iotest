@@ -506,7 +506,8 @@ double producer_work(struct work_config *wcfg,
                 double complex *pF =
                     F + ifacet * wcfg->recombine.F_size / sizeof(*F)
                     + x0*cfg->F_stride0;
-                memset(pF, 0, sizeof(*pF) * x0_chunk * cfg->F_stride0);
+                memset(pF, 0, sizeof(*pF) * cfg->F_stride0 *
+                       (x0_end-x0 > x0_chunk ? x0_chunk : x0_end-x0));
 
                 double w = wlevel * wcfg->wstep * wcfg->sg_step_w;
                 producer_fill_facet(wcfg, fwork + ifacet, pF,
