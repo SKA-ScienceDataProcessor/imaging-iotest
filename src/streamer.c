@@ -614,8 +614,9 @@ bool streamer_init(struct streamer *streamer,
     // Plan FFTs
     streamer->subgrid_plan = fftw_plan_dft_2d(cfg->xM_size, cfg->xM_size,
                                               streamer->subgrid_queue,
-                                              streamer->subgrid_queue,
+                                              streamer->subgrid_queue + cfg->SG_size,
                                               FFTW_BACKWARD, FFTW_MEASURE);
+
     // Allocate visibility queue
     streamer->vis_queue_size = (size_t)streamer->vis_queue_length * vis_data_size;
     streamer->vis_chunks_size = (size_t)streamer->vis_queue_length * sizeof(struct streamer_chunk);

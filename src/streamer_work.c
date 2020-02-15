@@ -259,7 +259,7 @@ void streamer_task(struct streamer *streamer,
                    struct subgrid_work_bl *bl,
                    int slot,
                    int subgrid_work,
-                   double complex *subgrid)
+                   double complex *subgrid_image)
 {
 
 
@@ -267,17 +267,21 @@ void streamer_task(struct streamer *streamer,
     const int SG_stride = xM_size + 16; // Assume 16x16 is biggest possible convolution
     const int SG2_size = sizeof(double complex) *
         SG_stride * xM_size;
-    double complex *subgrid2 = calloc(1, SG2_size);
     int i;
 
-    // Establish proper stride for the subgrid so we don't get cache
-    // thrashing problems when gridding moves (TODO: construct like this right away?)
-    if (subgrid)
-        for (i = 0; i < xM_size; i++) {
-            memcpy(subgrid2 + SG_stride * i,
+    // FFT and establish proper stride for the subgrid so we don't get
+    // cache thrashing problems when gridding moves (TODO: construct
+    // like this right away?)
+    double complex *subgrid = calloc(1, SG2_size);
+    if (subgrid_image) {
+        fftw_execute_dft(streamer->subgrid_plan, subgrid_image, subgrid);
+        fft_shift(subgrid, xM_size);
+        for (i = xM_size-1; i >= 0; i--) {
+            memcpy(subgrid + SG_stride * i,
                    subgrid + xM_size * i,
                    sizeof(double complex) * xM_size);
         }
+    }
 
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     struct subgrid_work_bl *bl2;
@@ -295,7 +299,7 @@ void streamer_task(struct streamer *streamer,
             for (fchunk = 0; fchunk < nfchunk; fchunk++)
                 if (streamer_degrid_chunk(streamer, work,
                                           bl2, tchunk, fchunk,
-                                          slot, SG_stride, subgrid2))
+                                          slot, SG_stride, subgrid))
                     nchunks++;
 
         // Check that plan predicted the right number of chunks. This
@@ -315,71 +319,20 @@ void streamer_task(struct streamer *streamer,
 #pragma omp atomic
     streamer->subgrid_locks[slot]--;
 
-    free(subgrid2);
+    free(subgrid);
 }
 
-void streamer_work(struct streamer *streamer,
-                   int subgrid_work,
-                   double complex *nmbf)
+// Perform checks on the subgrid data. Returns RMSE if we have sources
+// to do the checks.
+static double streamer_checks(struct streamer *streamer,
+                              struct subgrid_work *work,
+                              complex double *subgrid_image)
 {
-
     struct recombine2d_config *const cfg = &streamer->work_cfg->recombine;
-    struct subgrid_work *const work = streamer->work_cfg->subgrid_work +
-        streamer->subgrid_worker * streamer->work_cfg->subgrid_max_work + subgrid_work;
-    struct facet_work *const facet_work = streamer->work_cfg->facet_work;
-
-    const int facets = streamer->work_cfg->facet_workers * streamer->work_cfg->facet_max_work;
-    const int nmbf_length = cfg->NMBF_NMBF_size / sizeof(double complex);
-
-    // Find slot to write to
-    int slot;
-    while(true) {
-        for (slot = 0; slot < streamer->queue_length; slot++)
-            if (streamer->subgrid_locks[slot] == 0)
-                break;
-        if (slot < streamer->queue_length)
-            break;
-        #pragma omp taskyield
-        usleep(100);
-    }
-
-    double recombine_start = get_time_ns();
-
-    // Compare with reference
-    if (work->check_fct_path) {
-
-        int i0 = work->iv, i1 = work->iu;
-        int ifacet;
-        for (ifacet = 0; ifacet < facets; ifacet++) {
-            if (!facet_work[ifacet].set) continue;
-            int j0 = facet_work[ifacet].im, j1 = facet_work[ifacet].il;
-            double complex *ref = read_hdf5(cfg->NMBF_NMBF_size, work->check_hdf5,
-                                            work->check_fct_path, j0, j1);
-            int x; double err_sum = 0;
-            for (x = 0; x < nmbf_length; x++) {
-                double err = cabs(ref[x] - nmbf[nmbf_length*ifacet+x]); err_sum += err*err;
-            }
-            free(ref);
-            double rmse = sqrt(err_sum / nmbf_length);
-            if (!work->check_fct_threshold || rmse > work->check_fct_threshold) {
-                printf("Subgrid %d/%d facet %d/%d checked: %g RMSE\n",
-                       i0, i1, j0, j1, rmse);
-            }
-        }
-    }
-
-    // Accumulate contributions to this subgrid
-    double complex *subgrid = subgrid_slot(streamer, slot);
-    memset(subgrid, 0, cfg->SG_size);
-    int ifacet;
-    for (ifacet = 0; ifacet < facets; ifacet++)
-        recombine2d_af0_af1(cfg, subgrid,
-                            facet_work[ifacet].facet_off_m,
-                            facet_work[ifacet].facet_off_l,
-                            nmbf + nmbf_length*ifacet);
 
     // Perform Fourier transform
-    fftw_execute_dft(streamer->subgrid_plan, subgrid, subgrid);
+    complex double *subgrid = calloc(sizeof(complex double), cfg->SG_size);
+    fftw_execute_dft(streamer->subgrid_plan, subgrid_image, subgrid);
 
     // Check accumulated result
     if (work->check_path && streamer->work_cfg->facet_workers > 0) {
@@ -486,7 +439,76 @@ void streamer_work(struct streamer *streamer,
 
     }
 
+    free(subgrid);
+    if (err_samples > 0)
+        return sqrt(err_sum / err_samples) / streamer->work_cfg->source_energy;
+    else
+        return -1;
+}
+
+void streamer_work(struct streamer *streamer,
+                   int subgrid_work,
+                   double complex *nmbf)
+{
+
+    struct recombine2d_config *const cfg = &streamer->work_cfg->recombine;
+    struct subgrid_work *const work = streamer->work_cfg->subgrid_work +
+        streamer->subgrid_worker * streamer->work_cfg->subgrid_max_work + subgrid_work;
+    struct facet_work *const facet_work = streamer->work_cfg->facet_work;
+
+    const int facets = streamer->work_cfg->facet_workers * streamer->work_cfg->facet_max_work;
+    const int nmbf_length = cfg->NMBF_NMBF_size / sizeof(double complex);
+
+    // Find slot to write to
+    int slot;
+    while(true) {
+        for (slot = 0; slot < streamer->queue_length; slot++)
+            if (streamer->subgrid_locks[slot] == 0)
+                break;
+        if (slot < streamer->queue_length)
+            break;
+        #pragma omp taskyield
+        usleep(100);
+    }
+
+    double recombine_start = get_time_ns();
+
+    // Compare with reference
+    if (work->check_fct_path) {
+
+        int i0 = work->iv, i1 = work->iu;
+        int ifacet;
+        for (ifacet = 0; ifacet < facets; ifacet++) {
+            if (!facet_work[ifacet].set) continue;
+            int j0 = facet_work[ifacet].im, j1 = facet_work[ifacet].il;
+            double complex *ref = read_hdf5(cfg->NMBF_NMBF_size, work->check_hdf5,
+                                            work->check_fct_path, j0, j1);
+            int x; double err_sum = 0;
+            for (x = 0; x < nmbf_length; x++) {
+                double err = cabs(ref[x] - nmbf[nmbf_length*ifacet+x]); err_sum += err*err;
+            }
+            free(ref);
+            double rmse = sqrt(err_sum / nmbf_length);
+            if (!work->check_fct_threshold || rmse > work->check_fct_threshold) {
+                printf("Subgrid %d/%d facet %d/%d checked: %g RMSE\n",
+                       i0, i1, j0, j1, rmse);
+            }
+        }
+    }
+
+    // Accumulate contributions to this subgrid
+    double complex *subgrid = subgrid_slot(streamer, slot);
+    memset(subgrid, 0, cfg->SG_size);
+    int ifacet;
+    for (ifacet = 0; ifacet < facets; ifacet++)
+        recombine2d_af0_af1(cfg, subgrid,
+                            facet_work[ifacet].facet_off_m,
+                            facet_work[ifacet].facet_off_l,
+                            nmbf + nmbf_length*ifacet);
     streamer->recombine_time += get_time_ns() - recombine_start;
+
+    // Perform checks on result
+    double rmse = streamer_checks(streamer, work, subgrid);
 
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     if (spec->time_count > 0 && streamer->kern) {
@@ -518,10 +540,9 @@ void streamer_work(struct streamer *streamer,
                 streamer->task_start_time += get_time_ns() - task_start;
         }
 
-        if (err_samples > 0) {
+        if (rmse >= 0) {
             printf("Subgrid %d/%d/%d (%d baselines, rmse %.02g)\n",
-                   work->iu, work->iv, work->iw, i_bl,
-                   sqrt(err_sum / err_samples) / streamer->work_cfg->source_energy);
+                   work->iu, work->iv, work->iw, i_bl, rmse);
         } else {
             printf("Subgrid %d/%d/%d (%d baselines)\n",
                    work->iu, work->iv, work->iw, i_bl);
