@@ -41,11 +41,11 @@ test_T05: iotest
 %.test-tiny : iotest
 	$(MPIRUN) -n 2 ./iotest --rec-set=tiny --vis-set=vlaa \
 		--subgrid-queue=128 --source-count=10 --grid=$(@:.test-tiny=) \
-		--max-error=5e-4
+		--max-error=5e-4 --vis-round-to-wplane
 %.test-small : iotest
 	$(MPIRUN) -n 2 ./iotest --rec-set=small --vis-set=vlaa \
 		--subgrid-queue=128 --source-count=10 --grid=$(@:.test-small=) \
-		--max-error=7e-5
+		--max-error=7e-5 --vis-round-to-wplane
 
 test_tiny: $(KERNELS:=.test-tiny)
 test_small: $(KERNELS:=.test-small)
