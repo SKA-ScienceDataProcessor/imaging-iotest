@@ -167,37 +167,49 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
     }
     i0 = imax(0, imin(i0, i1));
 
+    /* i1 = imax(i1, i0); */
+    /* printf("Skip %d / degrid %d / skip %d\n", i0, i1-i0, count-i1); */
+
     // Fill zeroes
     int i = 0; double complex *pvis = pvis0;
     double u = u0, v = v0, w = w0;
     for (; i < i0; i++, u += du, v += dv, w += dw, pvis++) {
-        /* assert(!( u >= min_u && u < max_u && */
-        /*           v >= min_v && v < max_v && */
-        /*           w >= min_w && w < max_w )); */
+        assert(!( u >= min_u && u < max_u &&
+                  v >= min_v && v < max_v &&
+                  w >= min_w && w < max_w ));
         *pvis = 0.;
     }
 
     // Anything to do?
     if (i < i1) {
 
-#ifdef __AVX2__
-        if (kernel->size == 8) {
-            #include "grid_avx2_8.c"
-        } else if (kernel->size == 10) {
-            #include "grid_avx2_10.c"
-        } else if (kernel->size == 12) {
-            #include "grid_avx2_12.c"
-        } else if (kernel->size == 14) {
-            #include "grid_avx2_14.c"
-        } else if (kernel->size == 16) {
-            #include "grid_avx2_16.c"
+/* #ifdef __AVX2__ */
+/*         if (kernel->size == 8) { */
+/*             #include "grid_avx2_8.c" */
+/*         } else if (kernel->size == 10) { */
+/*             #include "grid_avx2_10.c" */
+/*         } else if (kernel->size == 12) { */
+/*             #include "grid_avx2_12.c" */
+/*         } else if (kernel->size == 14) { */
+/*             #include "grid_avx2_14.c" */
+/*         } else if (kernel->size == 16) { */
+/*             #include "grid_avx2_16.c" */
 
-        } else
-#endif
+/*         } else */
+/* #endif */
         {
 
             double complex mult = (conjugate ? 1 - I : 1 + I);
             for (; i < i1; i++, u += du, v += dv, w += dw, pvis+=1) {
+                if (!(u >= min_u && u < max_u &&
+                       v >= min_v && v < max_v &&
+                      w >= min_w && w < max_w)){
+                    printf("%g %g %g  %g %g %g  %g %g %g\n",
+                           u, min_u, max_u,
+                           v, min_v, max_v,
+                           w, min_w, max_w);
+                    printf("%g %g %g\n", du, dv, dw);
+                }
                 assert(u >= min_u && u < max_u &&
                        v >= min_v && v < max_v &&
                        w >= min_w && w < max_w);
@@ -210,9 +222,9 @@ void degrid_conv_uv_line(double complex *uvgrid, int grid_size, int grid_stride,
 
     // Fill remaining zeroes
     for (; i < count; i++, u += du, v += dv, w += dw, pvis++) {
-        /* assert(!( u >= min_u && u < max_u && */
-        /*           v >= min_v && v < max_v && */
-        /*           w >= min_w && w < max_w )); */
+        assert(!( u >= min_u && u < max_u &&
+                  v >= min_v && v < max_v &&
+                  w >= min_w && w < max_w ));
         *pvis = 0.;
     }
 

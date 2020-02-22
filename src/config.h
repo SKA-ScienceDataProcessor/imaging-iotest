@@ -44,7 +44,7 @@ struct subgrid_work_bl
 {
     int a1, a2; // Baseline antennas
     int chunks; // Number of (time,frequency) chunks overlapping
-    double min_w; // Minimum touched w-level (for sorting)
+    double min_w, max_w; // Minimum+maximum touched w-level (for sorting)
     struct bl_data *bl_data;
     struct subgrid_work_bl *next;
 };

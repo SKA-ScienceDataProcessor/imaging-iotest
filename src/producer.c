@@ -468,6 +468,9 @@ double producer_work(struct work_config *wcfg,
             max_wlevel = wcfg->subgrid_work[iwork].iw;
     }
 
+    // TODO: DEBUGGING! REMOVE!
+    //min_wlevel = -1;
+
     int wlevel;
     double stream_time = 0;
     for (wlevel = min_wlevel; wlevel <= max_wlevel; wlevel++) {

@@ -55,24 +55,20 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
     for (time = it0; time < it1; time++) {
 
         // Determine coordinates
-        double u = uvw_lambda(bl_data, time, 0, 0);
-        double v = uvw_lambda(bl_data, time, 0, 1);
-        double w = uvw_lambda(bl_data, time, 0, 2);
-        double du = uvw_lambda(bl_data, time, 1, 0) - u;
-        double dv = uvw_lambda(bl_data, time, 1, 1) - v;
-        double dw = uvw_lambda(bl_data, time, 1, 2) - w;
-
-        // Round to w-plane? Useful for testing simple gridders
-        if (streamer->work_cfg->vis_round_to_wplane) {
-            w = mid_w; dw = 0;
-        }
-
+        double u = uvw_lambda(bl_data, time, if0, 0);
+        double v = uvw_lambda(bl_data, time, if0, 1);
+        double w = uvw_lambda(bl_data, time, if0, 2);
+        double du = uvw_lambda(bl_data, time, if0+1, 0) - u;
+        double dv = uvw_lambda(bl_data, time, if0+1, 1) - v;
+        double dw = uvw_lambda(bl_data, time, if0+1, 2) - w;
         if (conjugate) {
             u *= -1; du *= -1; v *= -1; dv *= -1; w *= -1; dw *= -1;
         }
 
         // Degrid a line of visibilities
         double complex *pvis = vis_data + (time-it0)*spec->freq_chunk;
+        //if (fabs(w-mid_w) > 300) {
+            //}
         degrid_conv_uv_line(subgrid, subgrid_size, SG_stride, theta,
                             u-mid_u, v-mid_v, w-mid_w, du, dv, dw, if1 - if0,
                             min_u-mid_u, max_u-mid_u,
@@ -97,8 +93,26 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                 // negate if necessary
                 complex double vis = 0;
                 if (check_u >= min_u && check_u < max_u &&
-                    check_v >= min_v && check_v < max_v) {
-                    if (conjugate) { check_u *= -1; check_v *= -1; }
+                    check_v >= min_v && check_v < max_v &&
+                    check_w >= min_w && check_w < max_w) {
+
+
+                    if (streamer->work_cfg->vis_round_to_wplane) {
+                        if (fabs(check_w - mid_w) >
+                            streamer->work_cfg->wstep / 2) {
+
+                            printf("check_u=%g mid_u=%g diff=%g\n",
+                                   check_u, mid_u, fabs(check_u - mid_u));
+                            printf("check_v=%g mid_v=%g diff=%g\n",
+                                   check_v, mid_v, fabs(check_v - mid_v));
+                            printf("check_w=%g mid_w=%g diff=%g\n",
+                                   check_w, mid_w, fabs(check_w - mid_w));
+                            assert(fabs(check_w - mid_w) <= streamer->work_cfg->wstep / 2);
+                        }
+                        check_w = mid_w;
+                    }
+
+                    if (conjugate) { check_u *= -1; check_v *= -1; check_w *= -1; }
 
                     // Generate visibility
                     for (i = 0; i < source_count; i++) {
@@ -115,10 +129,21 @@ uint64_t streamer_degrid_worker(struct streamer *streamer,
                 // Check error
                 square_error_samples += 1;
                 double err = cabs(vis_out - vis);
-                if (err > 1e-7) {
-                    fprintf(stderr,
-                           "WARNING: uv %g/%g (sg %d/%d): %g%+gj != %g%+gj\n",
-                           u, v, iu, iv, creal(vis_out), cimag(vis_out), creal(vis), cimag(vis));
+                if (err > 1e-5) {
+                    printf("%d  %g/%g/%g-%g/%g/%g (sg %g/%g/%g x %g/%g/%g)\n",
+                           time,
+                           u, v, w, u+du*(if1-if0),v+dv*(if1-if0),w+dw*(if1-if0),
+                           min_u, min_v, min_w,
+                           max_u, max_v, max_w);
+                    for (i = 0; i < 128; i++) {
+                        printf(" %g%+gj ", creal(subgrid[i]), cimag(subgrid[i]));
+                    }
+                    puts("");
+                    for (i = 0; i < if1-if0; i++) {
+                        printf(" %g%+gj ", creal(pvis[i]), cimag(pvis[i]));
+                    }
+                    printf("\nWARNING: uv %g/%g (sg %d/%d): %g%+gj != %g%+gj\n",
+                           check_u, check_v, iu, iv, creal(vis_out), cimag(vis_out), creal(vis), cimag(vis));
                 }
                 worst_err = fmax(err, worst_err);
                 square_error_sum += err * err;
@@ -199,10 +224,22 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     double min_uvw[3], max_uvw[3];
     bl_bounding_box(bl->bl_data, !positive_u, it0, it1-1, if0, if1-1,
                     min_uvw, max_uvw);
+    double overlap =
+        -fmax((fmax(min_uvw[0], sg_min_u) - fmin(max_uvw[0], sg_max_u)),
+              (fmax(min_uvw[1], sg_min_v) - fmin(max_uvw[1], sg_max_v)));
     if (!(min_uvw[0] < sg_max_u && max_uvw[0] > sg_min_u &&
           min_uvw[1] < sg_max_v && max_uvw[1] > sg_min_v &&
           min_uvw[2] < sg_max_w && max_uvw[2] > sg_min_w))
         return false;
+    /* printf("%d-%d it=%d-%d if=%d-%d " */
+    /*        "u%g-%g v%g-%g w%g-%g " */
+    /*        "overlap=%g\n", */
+    /*        bl->bl_data->antenna1, bl->bl_data->antenna2, */
+    /*        it0,it1,if0,if1, */
+    /*        min_uvw[0], max_uvw[0], //sg_min_u, sg_max_u, */
+    /*        min_uvw[1], max_uvw[1], //sg_min_v, sg_max_v, */
+    /*        min_uvw[2], max_uvw[2], //sg_min_w, sg_max_w, */
+    /*        overlap); */
 
     // Determine least busy writer
     int i, least_waiting = 2 * streamer->vis_queue_per_writer;
@@ -234,6 +271,7 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     #pragma omp atomic
       streamer->degrid_time += get_time_ns() - start;
 
+      //assert(flops > 0 || overlap < 80);
     if (chunk) {
 
         // No flops executed? Signal to writer that we can skip writing
@@ -254,62 +292,110 @@ bool streamer_degrid_chunk(struct streamer *streamer,
     return true;
 }
 
+// How is this not in the standard library somewhere?
+// (stolen from Stack Overflow)
+inline static double complex cipow(double complex base, int exp)
+{
+    double complex result = 1;
+    if (exp < 0) return 1 / cipow(base, -exp);
+    if (exp == 1) return base;
+    while (exp)
+    {
+        if (exp & 1)
+            result *= base;
+        exp >>= 1;
+        base *= base;
+    }
+    return result;
+}
+
 void streamer_task(struct streamer *streamer,
                    struct subgrid_work *work,
-                   struct subgrid_work_bl *bl,
+                   struct subgrid_work_bl *bl_start,
                    int slot,
                    int subgrid_work,
                    double complex *subgrid_image)
 {
 
 
+    // Determine subgrid dimensions.
     const int xM_size = streamer->work_cfg->recombine.xM_size;
     const int SG_stride = xM_size + 16; // Assume 16x16 is biggest possible convolution
-    const int SG2_size = sizeof(double complex) *
-        SG_stride * xM_size;
-    int i;
-
-    // FFT and establish proper stride for the subgrid so we don't get
-    // cache thrashing problems when gridding moves (TODO: construct
-    // like this right away?)
+    const int SG2_size = sizeof(double complex) * SG_stride * xM_size;
     double complex *subgrid = calloc(1, SG2_size);
-    if (subgrid_image) {
-        fftw_execute_dft(streamer->subgrid_plan, subgrid_image, subgrid);
-        fft_shift(subgrid, xM_size);
-        for (i = xM_size-1; i >= 0; i--) {
-            memcpy(subgrid + SG_stride * i,
-                   subgrid + xM_size * i,
-                   sizeof(double complex) * xM_size);
-        }
+
+    // Determine how much space we need to cover along the w-axis
+    struct subgrid_work_bl *bl;
+    int i_bl; double min_w = bl_start->min_w, max_w = bl_start->max_w;
+    for (bl = bl_start->next, i_bl = 1;
+         bl && i_bl < streamer->work_cfg->vis_bls_per_task;
+         bl = bl->next, i_bl++) {
+
+        min_w = fmin(min_w, bl->min_w);
+        max_w = fmax(max_w, bl->max_w);
     }
 
-    struct vis_spec *const spec = &streamer->work_cfg->spec;
-    struct subgrid_work_bl *bl2;
-    int i_bl2;
-    for (bl2 = bl, i_bl2 = 0;
-         bl2 && i_bl2 < streamer->work_cfg->vis_bls_per_task;
-         bl2 = bl2->next, i_bl2++) {
+    // Determine w-planes need to cover
+    const double wstep = streamer->work_cfg->wstep;
+    int w_start = (int) floor(min_w / wstep + 0.5) - work->subgrid_off_w;
+    int w_end = (int) floor(max_w / wstep + 0.5) - work->subgrid_off_w;
 
-        // Go through time/frequency chunks
-        int ntchunk = (bl->bl_data->time_count + spec->time_chunk - 1) / spec->time_chunk;
-        int nfchunk = (bl->bl_data->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
-        int tchunk, fchunk;
-        int nchunks = 0;
-        for (tchunk = 0; tchunk < ntchunk; tchunk++)
-            for (fchunk = 0; fchunk < nfchunk; fchunk++)
-                if (streamer_degrid_chunk(streamer, work,
-                                          bl2, tchunk, fchunk,
-                                          slot, SG_stride, subgrid))
-                    nchunks++;
+    //printf("w_min = %g (%d), w_max = %g (%d)\n", min_w, w_start, max_w, w_end);
 
-        // Check that plan predicted the right number of chunks. This
-        // is pretty important - if this fails this means that the
-        // coordinate calculations are out of synch, which might mean
-        // that we have failed to account for some visibilities in the
-        // plan!
-        if (bl2->chunks != nchunks)
-            printf("WARNING: subgrid (%d/%d/%d) baseline (%d-%d) %d chunks planned, %d actual!\n",
-                   work->iu, work->iv, work->iw, bl2->a1, bl2->a2, bl2->chunks, nchunks);
+    int wplane;
+    for (wplane = w_start; wplane <= w_end; wplane++) {
+
+        // FFT and establish proper stride for the subgrid so we don't get
+        // cache thrashing problems when gridding moves (TODO: construct
+        // like this right away? Shouldn't FFTW be able to do this?)
+        if (subgrid_image) {
+            double start_time = get_time_ns();
+
+            // Apply w-transfer pattern
+            int i;
+            double complex *const wtransfer = streamer->wtransfer;
+            printf("wplane=%d (min_wp=%g)\n", wplane,
+                   min_w / wstep - work->subgrid_off_w);
+            for (i = 0; i < xM_size * xM_size; i++) {
+                subgrid[i] = subgrid_image[i] * cipow(wtransfer[i], wplane);
+            }
+            fftw_execute_dft(streamer->subgrid_plan, subgrid, subgrid);
+            fft_shift(subgrid, xM_size);
+            for (i = xM_size-1; i >= 0; i--) {
+                memmove(subgrid + SG_stride * i,
+                        subgrid + xM_size * i,
+                        sizeof(double complex) * xM_size);
+            }
+            streamer->fft_time += get_time_ns() - start_time;
+        }
+
+        struct vis_spec *const spec = &streamer->work_cfg->spec;
+        for (bl = bl_start, i_bl = 0;
+             bl && i_bl < streamer->work_cfg->vis_bls_per_task;
+             bl = bl->next, i_bl++) {
+
+            // Go through time/frequency chunks
+            int ntchunk = (bl->bl_data->time_count + spec->time_chunk - 1) / spec->time_chunk;
+            int nfchunk = (bl->bl_data->freq_count + spec->freq_chunk - 1) / spec->freq_chunk;
+            int tchunk, fchunk;
+            int nchunks = 0;
+            for (tchunk = 0; tchunk < ntchunk; tchunk++)
+                for (fchunk = 0; fchunk < nfchunk; fchunk++)
+                    if (streamer_degrid_chunk(streamer, work,
+                                              bl, tchunk, fchunk,
+                                              slot, SG_stride, subgrid))
+                        nchunks++;
+
+            // Check that plan predicted the right number of chunks. This
+            // is pretty important - if this fails this means that the
+            // coordinate calculations are out of synch, which might mean
+            // that we have failed to account for some visibilities in the
+            // plan!
+            if (bl->chunks != nchunks)
+                printf("WARNING: subgrid (%d/%d/%d) baseline (%d-%d) %d chunks planned, %d actual!\n",
+                       work->iu, work->iv, work->iw, bl->a1, bl->a2, bl->chunks, nchunks);
+
+        }
 
     }
 
@@ -508,7 +594,9 @@ void streamer_work(struct streamer *streamer,
     streamer->recombine_time += get_time_ns() - recombine_start;
 
     // Perform checks on result
+    double check_start = get_time_ns();
     double rmse = streamer_checks(streamer, work, subgrid);
+    streamer->check_time += get_time_ns() - check_start;
 
     struct vis_spec *const spec = &streamer->work_cfg->spec;
     if (spec->time_count > 0 && streamer->kern) {

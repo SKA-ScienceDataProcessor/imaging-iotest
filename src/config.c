@@ -89,7 +89,7 @@ static int bin_baseline(struct vis_spec *spec, struct bl_data *bl_data,
                         double lam_sg, double wstep_sg,
                         int nsubgrid, int nwlevels,
                         int a1, int a2, int iu, int iv, int iw,
-                        double *pmin_w)
+                        double *pmin_w, double *pmax_w)
 {
     assert (iu >= 0 && iu < nsubgrid);
     assert (iv >= 0 && iv < nsubgrid);
@@ -103,7 +103,7 @@ static int bin_baseline(struct vis_spec *spec, struct bl_data *bl_data,
     double sg_max_w = wstep_sg*(iw-nwlevels/2) + wstep_sg/2;
     int ntchunk = spec_time_chunks(spec);
     int nfchunk = spec_freq_chunks(spec);
-    double min_w = sg_max_w;
+    double min_w = sg_max_w, max_w = sg_min_w;
 
     // Count number of overlapping chunks
     for (tchunk = 0; tchunk < ntchunk; tchunk++) {
@@ -140,6 +140,7 @@ static int bin_baseline(struct vis_spec *spec, struct bl_data *bl_data,
                     // Found a chunk
                     chunks++;
                     min_w = fmin(min_w, uvw_l_min[2]);
+                    max_w = fmax(max_w, uvw_l_max[2]);
                 } else {
                     // Went too fast. Decrease step length, recheck.
                     fstep /= 2;
@@ -153,7 +154,9 @@ static int bin_baseline(struct vis_spec *spec, struct bl_data *bl_data,
         }
     }
 
-    if (pmin_w) *pmin_w = min_w;
+    // Return bounds
+    if (pmin_w) *pmin_w = fmax(min_w, sg_min_w);
+    if (pmax_w) *pmax_w = fmin(max_w, sg_max_w);
     return chunks;
 }
 
@@ -185,12 +188,14 @@ static void collect_work(struct vis_spec *spec, struct bl_data *bl_data,
                 continue;
 
             // Count actual number of chunks
-            double min_w; // lowest w-level touched by a chunk
+            double min_w, max_w; // lowest/highest w-level touched by a chunk
             struct bl_data *bl_data_bl = bl_data + spec->cfg->ant_count*a2+a1;
             int chunks = bin_baseline(spec, bl_data_bl,
                                       lam_sg, wstep_sg,
                                       nsubgrid, nwlevels,
-                                      a1, a2, iu, iv, iw, &min_w);
+                                      a1, a2, iu, iv, iw, &min_w, &max_w);
+            assert(min_w >= wstep_sg * (iw-nwlevels/2) - wstep_sg/2);
+            assert(max_w <= wstep_sg * (iw-nwlevels/2) + wstep_sg/2);
             if (!chunks)
                 continue;
 
@@ -214,6 +219,7 @@ static void collect_work(struct vis_spec *spec, struct bl_data *bl_data,
             wbl->a1 = a1; wbl->a2 = a2; wbl->chunks=chunks;
             wbl->next = pos;
             wbl->min_w = min_w;
+            wbl->max_w = max_w;
             /* wbl->sg_min_u = sg_min[0]; */
             /* wbl->sg_min_v = sg_min[1]; */
             /* wbl->sg_min_w = sg_min[2]; */

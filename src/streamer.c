@@ -442,6 +442,8 @@ void *streamer_publish_stats(void *par)
         _append_stat(PARS(wait_in_time), 100. / streamer->num_workers / sample_rate);
         _append_stat(PARS(task_start_time), 100 / sample_rate);
         _append_stat(PARS(recombine_time), 100 / sample_rate);
+        _append_stat(PARS(fft_time), 100 / sample_rate);
+        _append_stat(PARS(check_time), 100 / sample_rate);
         _append_stat(PARS(degrid_time), 100. / streamer->num_workers / sample_rate);
         _append_stat(PARS(received_data), 1 / sample_rate);
         _append_stat(PARS(received_subgrids), 1 / sample_rate);
@@ -537,7 +539,8 @@ bool streamer_init(struct streamer *streamer,
 
     streamer->num_workers = omp_get_max_threads();
     streamer->wait_time = streamer->wait_in_time = streamer->degrid_time =
-        streamer->task_start_time = streamer->recombine_time = 0;
+        streamer->task_start_time = streamer->recombine_time =
+        streamer->check_time = streamer->fft_time = 0;
     streamer->received_data = 0;
     streamer->received_subgrids = streamer->baselines_covered = 0;
     streamer->vis_error_samples = 0;
@@ -555,6 +558,22 @@ bool streamer_init(struct streamer *streamer,
     // Load gridding kernel
     if (wcfg->gridder.data) {
         streamer->kern = &wcfg->gridder;
+    }
+
+    // Generate w-transfer pattern
+    streamer->wtransfer = malloc(sizeof(complex double) * cfg->SG_size);
+    int x, y;
+    const int xM_size = cfg->xM_size;
+    const double theta = wcfg->theta;
+    for (y = 0; y < xM_size; y++) {
+        double m = theta * (y - xM_size/2) / xM_size;
+        for (x = 0; x < xM_size; x++) {
+            double l = theta * (x - xM_size/2) / xM_size;
+            double n = sqrt(1 - l*l - m*m) - 1;
+            double ph = wcfg->wstep * n;
+            streamer->wtransfer[y*xM_size+x] =
+                cos(2*M_PI*ph) + 1.j * sin(2*M_PI*ph);
+        }
     }
 
     // Calculate size of queues
@@ -614,7 +633,7 @@ bool streamer_init(struct streamer *streamer,
     // Plan FFTs
     streamer->subgrid_plan = fftw_plan_dft_2d(cfg->xM_size, cfg->xM_size,
                                               streamer->subgrid_queue,
-                                              streamer->subgrid_queue + cfg->SG_size,
+                                              streamer->subgrid_queue,
                                               FFTW_BACKWARD, FFTW_MEASURE);
 
     // Allocate visibility queue
@@ -711,14 +730,17 @@ bool streamer_free(struct streamer *streamer,
     printf("Received %.2f GB (%"PRIu64" subgrids, %"PRIu64" baselines)\n",
            (double)streamer->received_data / 1000000000, streamer->received_subgrids,
            streamer->baselines_covered);
-    printf("Receiver: Wait: %gs, Recombine: %gs, Idle: %gs\n",
-           streamer->wait_time, streamer->recombine_time,
-           stream_time - streamer->wait_time - streamer->recombine_time);
-    printf("Worker: Wait: %gs, Degrid: %gs, Idle: %gs\n",
+    printf("Receiver: Wait: %gs, Recombine: %gs, Check: %gs, Idle: %gs\n",
+           streamer->wait_time, streamer->recombine_time, streamer->check_time,
+           stream_time - streamer->wait_time - streamer->recombine_time
+           - streamer->check_time);
+    printf("Worker: Wait: %gs, FFT: %gs, Degrid: %gs, Idle: %gs\n",
            streamer->wait_in_time,
+           streamer->fft_time,
            streamer->degrid_time,
            streamer->num_workers * stream_time
            - streamer->wait_in_time - streamer->degrid_time
+           - streamer->check_time - streamer->fft_time
            - streamer->wait_time - streamer->recombine_time);
     printf("Operations: degrid %.1f GFLOP/s (%"PRIu64" chunks)\n",
            (double)streamer->degrid_flops / stream_time / 1000000000,

@@ -85,11 +85,14 @@ struct streamer
     struct streamer_chunk *vis_chunks;
     struct streamer_writer *writer;
 
+    // Transfer pattern for w-towers
+    double complex *wtransfer;
+
     // Statistics
     int num_workers;
     double wait_time;
     double wait_in_time;
-    double recombine_time, task_start_time, degrid_time;
+    double recombine_time, check_time, fft_time, task_start_time, degrid_time;
     uint64_t received_data, received_subgrids, baselines_covered;
     uint64_t vis_error_samples, grid_error_samples;
     double vis_error_sum, vis_worst_error, grid_error_sum, grid_worst_error;
